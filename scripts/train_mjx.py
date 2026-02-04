@@ -238,12 +238,12 @@ class HumanoidHugMJX:
         """Reset all environments."""
         rng, rng_reset = jax.random.split(rng)
         
-        # Create base data
-        mjx_data = mjx.make_data(self.mjx_model)
-        
-        # Batch it
+        # Create batched reset RNGs
         batch_rngs = jax.random.split(rng_reset, self.num_envs)
-        mjx_data = jax.vmap(lambda r: self._reset_single(mjx_data, r))(batch_rngs)
+        
+        # Vectorized reset - vmap over RNG, model is static
+        batched_reset = jax.vmap(self._reset_single, in_axes=(0,))
+        mjx_data = batched_reset(batch_rngs)
         
         state = EnvState(
             mjx_data=mjx_data,
@@ -255,9 +255,12 @@ class HumanoidHugMJX:
         obs = self._get_obs(mjx_data)
         return state, obs
     
-    def _reset_single(self, base_data: mjx.Data, rng: jax.Array) -> mjx.Data:
+    def _reset_single(self, rng: jax.Array) -> mjx.Data:
         """Reset a single environment with randomized initial state."""
         rng, rng_dist, rng_h0_pos, rng_h1_pos, rng_h0_yaw, rng_h1_yaw = jax.random.split(rng, 6)
+        
+        # Create fresh data for this env
+        base_data = mjx.make_data(self.mjx_model)
         
         qpos = base_data.qpos.copy()
         qvel = jnp.zeros_like(base_data.qvel)
@@ -317,13 +320,19 @@ class HumanoidHugMJX:
         ctrl = ctrl.at[:, self.h0_actuator_idx].set(jnp.clip(h0_actions, -1.0, 1.0))
         ctrl = ctrl.at[:, self.h1_actuator_idx].set(jnp.clip(h1_actions, -1.0, 1.0))
         
-        # Step physics (with frame_skip)
+        # Update control in batched data
         mjx_data = state.mjx_data.replace(ctrl=ctrl)
         
-        def physics_step(data, _):
-            return mjx.step(self.mjx_model, data), None
+        # Vmapped physics step function
+        @jax.vmap
+        def step_single(data):
+            """Step a single environment through frame_skip steps."""
+            def do_step(d, _):
+                return mjx.step(self.mjx_model, d), None
+            d, _ = jax.lax.scan(do_step, data, None, length=self.frame_skip)
+            return d
         
-        mjx_data, _ = jax.lax.scan(physics_step, mjx_data, None, length=self.frame_skip)
+        mjx_data = step_single(mjx_data)
         
         # Compute observations, rewards, terminations
         obs = self._get_obs(mjx_data)
@@ -350,8 +359,7 @@ class HumanoidHugMJX:
         reset_rngs = jax.random.split(rng_reset, self.num_envs)
         
         def maybe_reset(done_flag, data, reset_rng):
-            base_data = mjx.make_data(self.mjx_model)
-            reset_data = self._reset_single(base_data, reset_rng)
+            reset_data = self._reset_single(reset_rng)
             return jax.lax.cond(done_flag, lambda: reset_data, lambda: data)
         
         mjx_data = jax.vmap(maybe_reset)(done, mjx_data, reset_rngs)
