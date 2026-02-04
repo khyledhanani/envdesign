@@ -50,6 +50,12 @@ train-ray = [
     "imageio>=2.20.0",
     "imageio-ffmpeg>=0.4.0",
 ]
+mjx = [
+    "jax[cuda12]>=0.4.20",
+    "flax>=0.8.0",
+    "optax>=0.1.7",
+    "mujoco>=3.0.0",
+]
 
 [project.urls]
 Homepage = "https://github.com/humanoid-hug/humanoid_hug"

@@ -4,16 +4,19 @@ Simple IPPO (Independent PPO) training for Humanoid Hug environment.
 No Ray dependency - just PyTorch + PettingZoo.
 
 Based on CleanRL's PPO implementation style.
+Now with TRUE parallel environments using multiprocessing!
 """
 
 import argparse
+import multiprocessing as mp
 import os
 import random
 import time
 from collections import deque
 from dataclasses import dataclass
+from multiprocessing import Pipe, Process
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Any
 
 import numpy as np
 import torch
@@ -32,6 +35,223 @@ except ImportError:
 from humanoid_hug import HumanoidHugEnv
 
 
+# =============================================================================
+# Subprocess-based Parallel Environments (TRUE parallelism)
+# =============================================================================
+
+def _worker_process(
+    remote: mp.connection.Connection,
+    parent_remote: mp.connection.Connection,
+    env_config: Dict[str, Any],
+    worker_id: int,
+):
+    """
+    Worker process that runs a single environment instance.
+    Communicates with main process via pipe.
+    """
+    parent_remote.close()  # Close parent's end in child
+    
+    # Create environment in this process
+    env = HumanoidHugEnv(
+        render_mode=None,
+        horizon=env_config["horizon"],
+        stage=env_config["stage"],
+    )
+    
+    agents = ["h0", "h1"]
+    
+    try:
+        while True:
+            cmd, data = remote.recv()
+            
+            if cmd == "step":
+                actions = data
+                
+                # Check if env needs reset (no active agents)
+                if not env.agents:
+                    obs, _ = env.reset()
+                    result = {
+                        "obs": {agent: obs[agent] for agent in agents},
+                        "rewards": {agent: 0.0 for agent in agents},
+                        "done": True,
+                        "info": {"auto_reset": True},
+                    }
+                    remote.send(result)
+                    continue
+                
+                # Step the environment
+                obs, rewards, terminations, truncations, info = env.step(actions)
+                done = any(terminations.values()) or any(truncations.values())
+                
+                if done:
+                    # Store terminal info before reset
+                    terminal_info = info.get("h0", {})
+                    terminal_info["episode_end"] = True
+                    # Auto-reset
+                    obs, _ = env.reset()
+                    result = {
+                        "obs": {agent: obs[agent] for agent in agents},
+                        "rewards": {agent: rewards.get(agent, 0.0) for agent in agents},
+                        "done": True,
+                        "info": terminal_info,
+                    }
+                else:
+                    result = {
+                        "obs": {agent: obs[agent] for agent in agents},
+                        "rewards": {agent: rewards.get(agent, 0.0) for agent in agents},
+                        "done": False,
+                        "info": info.get("h0", {}),
+                    }
+                
+                remote.send(result)
+            
+            elif cmd == "reset":
+                seed = data
+                obs, _ = env.reset(seed=seed)
+                remote.send({agent: obs[agent] for agent in agents})
+            
+            elif cmd == "get_spaces":
+                obs_dim = env.observation_space("h0").shape[0]
+                act_dim = env.action_space("h0").shape[0]
+                remote.send((obs_dim, act_dim))
+            
+            elif cmd == "close":
+                env.close()
+                remote.close()
+                break
+            
+            else:
+                raise ValueError(f"Unknown command: {cmd}")
+                
+    except Exception as e:
+        print(f"Worker {worker_id} error: {e}")
+        env.close()
+        remote.close()
+
+
+class SubprocVecEnv:
+    """
+    Vectorized environment using subprocesses for TRUE parallelism.
+    Each environment runs in its own process, stepping in parallel.
+    """
+    
+    def __init__(self, num_envs: int, horizon: int, stage: int):
+        self.num_envs = num_envs
+        self.agents = ["h0", "h1"]
+        self.waiting = False
+        self.closed = False
+        
+        env_config = {"horizon": horizon, "stage": stage}
+        
+        # Use 'spawn' for cross-platform compatibility (required on Windows/macOS)
+        ctx = mp.get_context("spawn")
+        
+        # Create pipes for communication
+        self.remotes, self.work_remotes = zip(*[ctx.Pipe() for _ in range(num_envs)])
+        
+        # Spawn worker processes
+        self.processes = []
+        for i, (work_remote, remote) in enumerate(zip(self.work_remotes, self.remotes)):
+            process = ctx.Process(
+                target=_worker_process,
+                args=(work_remote, remote, env_config, i),
+                daemon=True,
+            )
+            process.start()
+            self.processes.append(process)
+            work_remote.close()  # Close worker's end in parent
+        
+        # Get observation and action dimensions from first env
+        self.remotes[0].send(("get_spaces", None))
+        self.obs_dim, self.act_dim = self.remotes[0].recv()
+        
+        print(f"  SubprocVecEnv: {num_envs} workers spawned (obs_dim={self.obs_dim}, act_dim={self.act_dim})")
+    
+    def reset(self, seed: Optional[int] = None) -> Dict[str, np.ndarray]:
+        """Reset all environments in parallel."""
+        for i, remote in enumerate(self.remotes):
+            env_seed = seed + i if seed is not None else None
+            remote.send(("reset", env_seed))
+        
+        results = [remote.recv() for remote in self.remotes]
+        
+        # Stack observations
+        obs_dict = {
+            agent: np.stack([r[agent] for r in results]).astype(np.float32)
+            for agent in self.agents
+        }
+        return obs_dict
+    
+    def step_async(self, actions: Dict[str, np.ndarray]) -> None:
+        """Send actions to all workers (non-blocking)."""
+        for i, remote in enumerate(self.remotes):
+            env_actions = {agent: actions[agent][i] for agent in self.agents}
+            remote.send(("step", env_actions))
+        self.waiting = True
+    
+    def step_wait(self) -> Tuple[
+        Dict[str, np.ndarray],  # obs
+        Dict[str, np.ndarray],  # rewards
+        Dict[str, np.ndarray],  # dones
+        List[Dict],             # infos
+    ]:
+        """Wait for all workers to finish stepping."""
+        results = [remote.recv() for remote in self.remotes]
+        self.waiting = False
+        
+        obs_dict = {
+            agent: np.stack([r["obs"][agent] for r in results]).astype(np.float32)
+            for agent in self.agents
+        }
+        reward_dict = {
+            agent: np.array([r["rewards"][agent] for r in results], dtype=np.float32)
+            for agent in self.agents
+        }
+        done_dict = {
+            agent: np.array([r["done"] for r in results], dtype=bool)
+            for agent in self.agents
+        }
+        infos = [r["info"] for r in results]
+        
+        return obs_dict, reward_dict, done_dict, infos
+    
+    def step(self, actions: Dict[str, np.ndarray]) -> Tuple[
+        Dict[str, np.ndarray],
+        Dict[str, np.ndarray],
+        Dict[str, np.ndarray],
+        List[Dict],
+    ]:
+        """Step all environments in parallel (blocking)."""
+        self.step_async(actions)
+        return self.step_wait()
+    
+    def close(self) -> None:
+        """Clean up all worker processes."""
+        if self.closed:
+            return
+        
+        if self.waiting:
+            for remote in self.remotes:
+                remote.recv()
+        
+        for remote in self.remotes:
+            remote.send(("close", None))
+        
+        for process in self.processes:
+            process.join(timeout=5)
+            if process.is_alive():
+                process.terminate()
+        
+        self.closed = True
+
+
+class ParallelEnvWrapper:
+    """
+    DEPRECATED: Sequential wrapper kept for comparison/fallback.
+    Use SubprocVecEnv for true parallelism.
+    """
+
+
 @dataclass
 class PPOConfig:
     """PPO hyperparameters."""
@@ -41,7 +261,7 @@ class PPOConfig:
     
     # Training
     total_timesteps: int = 20_000_000
-    num_envs: int = 8  # Parallel environments
+    num_envs: int = 16  # Parallel environments (increased default for subproc)
     num_steps: int = 2048  # Steps per rollout per env
     num_epochs: int = 10  # PPO epochs per update
     minibatch_size: int = 512
@@ -66,6 +286,7 @@ class PPOConfig:
     # Misc
     seed: int = 42
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
+    use_subproc: bool = True  # Use subprocess parallelism (much faster)
     
     @property
     def batch_size(self) -> int:
@@ -395,8 +616,12 @@ def train(config: PPOConfig, checkpoint_dir: str, experiment_name: str):
     print(f"Using device: {device}")
     
     # Create parallel environments
-    print(f"Creating {config.num_envs} parallel environments...")
-    envs = ParallelEnvWrapper(config.num_envs, config.horizon, config.stage)
+    if config.use_subproc:
+        print(f"Creating {config.num_envs} SUBPROCESS environments (true parallelism)...")
+        envs = SubprocVecEnv(config.num_envs, config.horizon, config.stage)
+    else:
+        print(f"Creating {config.num_envs} sequential environments (no parallelism)...")
+        envs = ParallelEnvWrapper(config.num_envs, config.horizon, config.stage)
     
     # Create agents (one for each humanoid - IPPO)
     agents = {}
@@ -712,7 +937,7 @@ def main():
     
     # Training
     parser.add_argument("--total-timesteps", type=int, default=20_000_000, help="Total timesteps")
-    parser.add_argument("--num-envs", type=int, default=8, help="Number of parallel environments")
+    parser.add_argument("--num-envs", type=int, default=16, help="Number of parallel environments (16-32 recommended with subproc)")
     parser.add_argument("--num-steps", type=int, default=2048, help="Steps per rollout")
     parser.add_argument("--num-epochs", type=int, default=10, help="PPO epochs per update")
     parser.add_argument("--minibatch-size", type=int, default=512, help="Minibatch size")
@@ -733,6 +958,9 @@ def main():
     parser.add_argument("--experiment-name", type=str, default="humanoid_hug_ppo", help="Experiment name")
     parser.add_argument("--log-interval", type=int, default=1, help="Log every N updates")
     parser.add_argument("--save-interval", type=int, default=50, help="Save every N updates")
+    
+    # Parallelism
+    parser.add_argument("--no-subproc", action="store_true", help="Disable subprocess parallelism (use sequential stepping)")
     
     # Misc
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
@@ -759,21 +987,31 @@ def main():
         save_interval=args.save_interval,
         seed=args.seed,
         device=args.device,
+        use_subproc=not args.no_subproc,
     )
     
+    # Detect CPU cores for recommendations
+    cpu_count = os.cpu_count() or 8
+    
     print("=" * 60)
-    print("Humanoid Hug - Simple PPO Training")
+    print("Humanoid Hug - PPO Training")
     print("=" * 60)
     print(f"Device: {config.device}")
+    print(f"CPU cores available: {cpu_count}")
+    print(f"Parallelism: {'SUBPROCESS (true parallel)' if config.use_subproc else 'Sequential (slow)'}")
     print(f"Stage: {config.stage}")
     print(f"Total timesteps: {config.total_timesteps:,}")
     print(f"Parallel envs: {config.num_envs}")
-    print(f"Batch size: {config.batch_size}")
+    print(f"Batch size: {config.batch_size:,}")
     print(f"Network: {config.hidden_sizes}")
+    if config.use_subproc and config.num_envs < cpu_count:
+        print(f"TIP: You have {cpu_count} cores, consider --num-envs {min(cpu_count, 32)} for more throughput")
     print("=" * 60)
     
     train(config, args.checkpoint_dir, args.experiment_name)
 
 
 if __name__ == "__main__":
+    # Required for Windows multiprocessing support
+    mp.freeze_support()
     main()
