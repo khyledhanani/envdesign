@@ -22,7 +22,7 @@ from train_ppo_simple import PPOAgent, PPOConfig
 
 def load_model(checkpoint_path: str, device: str = "cpu"):
     """Load trained model from checkpoint."""
-    checkpoint = torch.load(checkpoint_path, map_location=device)
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
     
     # Get config
     config = checkpoint.get("config", PPOConfig())

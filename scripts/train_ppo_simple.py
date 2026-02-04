@@ -148,90 +148,38 @@ class PPOAgent(nn.Module):
         return action, log_prob, entropy, value
 
 
-def record_episode(
+def run_eval_episode(
     agents: Dict[str, "PPOAgent"],
-    config: PPOConfig,
+    eval_env: HumanoidHugEnv,
     device: torch.device,
-    output_path: str,
+    output_path: Optional[str] = None,
     deterministic: bool = True,
-) -> Tuple[float, int, str]:
-    """Record a single episode to video.
+) -> Tuple[float, int, str, bool]:
+    """Run a single evaluation episode, optionally recording video.
     
     Args:
         agents: Dictionary of trained agents
-        config: Training config
+        eval_env: Pre-created evaluation environment (reused to avoid init issues)
         device: Torch device
-        output_path: Path to save video
+        output_path: Path to save video (None to skip recording)
         deterministic: Use deterministic actions
         
     Returns:
-        Tuple of (episode_reward, episode_length, termination_reason)
+        Tuple of (episode_reward, episode_length, termination_reason, video_saved)
     """
-    if not HAS_IMAGEIO:
-        return 0.0, 0, "imageio_not_installed"
-    
-    # Try to create environment with rgb_array rendering
-    # This may fail on headless servers without proper OpenGL setup
-    try:
-        env = HumanoidHugEnv(render_mode="rgb_array", horizon=config.horizon, stage=config.stage)
-        # Test if rendering works
-        env.reset()
-        test_frame = env.render()
-        if test_frame is None:
-            raise RuntimeError("Render returned None")
-    except Exception as e:
-        # Rendering not available (headless server without EGL/osmesa)
-        # Run episode without recording, just return metrics
-        env = HumanoidHugEnv(render_mode=None, horizon=config.horizon, stage=config.stage)
-        obs_dict, _ = env.reset()
-        
-        episode_reward = 0.0
-        episode_length = 0
-        termination_reason = "unknown"
-        
-        for agent in agents.values():
-            agent.eval()
-        
-        while env.agents:
-            obs = {
-                agent_id: torch.tensor(obs_dict[agent_id], dtype=torch.float32, device=device).unsqueeze(0)
-                for agent_id in ["h0", "h1"]
-            }
-            
-            with torch.no_grad():
-                actions = {}
-                for agent_id in ["h0", "h1"]:
-                    action, _, _, _ = agents[agent_id].get_action_and_value(
-                        obs[agent_id], deterministic=deterministic
-                    )
-                    actions[agent_id] = action.cpu().numpy().squeeze(0)
-            
-            obs_dict, rewards, terminations, truncations, infos = env.step(actions)
-            episode_reward += (rewards.get("h0", 0) + rewards.get("h1", 0)) / 2
-            episode_length += 1
-            
-            if any(terminations.values()) or any(truncations.values()):
-                termination_reason = infos.get("h0", {}).get("termination_reason", "unknown")
-                break
-        
-        env.close()
-        for agent in agents.values():
-            agent.train()
-        
-        return episode_reward, episode_length, f"{termination_reason}_no_video"
-    
-    obs_dict, _ = env.reset()
+    obs_dict, _ = eval_env.reset()
     
     frames = []
     episode_reward = 0.0
     episode_length = 0
     termination_reason = "unknown"
+    can_render = eval_env.render_mode == "rgb_array"
     
     # Set agents to eval mode
     for agent in agents.values():
         agent.eval()
     
-    while env.agents:
+    while eval_env.agents:
         # Get observations as tensors
         obs = {
             agent_id: torch.tensor(obs_dict[agent_id], dtype=torch.float32, device=device).unsqueeze(0)
@@ -247,13 +195,17 @@ def record_episode(
                 )
                 actions[agent_id] = action.cpu().numpy().squeeze(0)
         
-        # Capture frame
-        frame = env.render()
-        if frame is not None:
-            frames.append(frame)
+        # Capture frame if rendering
+        if can_render and output_path:
+            try:
+                frame = eval_env.render()
+                if frame is not None:
+                    frames.append(frame)
+            except Exception:
+                can_render = False
         
         # Step environment
-        obs_dict, rewards, terminations, truncations, infos = env.step(actions)
+        obs_dict, rewards, terminations, truncations, infos = eval_env.step(actions)
         
         episode_reward += (rewards.get("h0", 0) + rewards.get("h1", 0)) / 2
         episode_length += 1
@@ -263,17 +215,20 @@ def record_episode(
             termination_reason = infos.get("h0", {}).get("termination_reason", "unknown")
             break
     
-    env.close()
-    
     # Set agents back to train mode
     for agent in agents.values():
         agent.train()
     
-    # Save video
-    if frames:
-        imageio.mimsave(output_path, frames, fps=50)
+    # Save video if we have frames
+    video_saved = False
+    if frames and output_path and HAS_IMAGEIO:
+        try:
+            imageio.mimsave(output_path, frames, fps=50)
+            video_saved = True
+        except Exception:
+            pass
     
-    return episode_reward, episode_length, termination_reason
+    return episode_reward, episode_length, termination_reason, video_saved
 
 
 class ParallelEnvWrapper:
@@ -466,9 +421,30 @@ def train(config: PPOConfig, checkpoint_dir: str, experiment_name: str):
     print(f"Logging to: {log_dir}")
     print(f"TensorBoard: tensorboard --logdir {log_dir / 'tensorboard'}")
     
+    # Create evaluation environment (reused throughout training to avoid init issues)
+    eval_env = None
+    can_record_video = False
+    
     if HAS_IMAGEIO:
-        print(f"Videos will be saved to: {log_dir / 'videos'}")
+        try:
+            eval_env = HumanoidHugEnv(render_mode="rgb_array", horizon=config.horizon, stage=config.stage)
+            eval_env.reset()
+            test_frame = eval_env.render()
+            if test_frame is not None:
+                can_record_video = True
+                print(f"Videos will be saved to: {log_dir / 'videos'}")
+            else:
+                eval_env.close()
+                eval_env = HumanoidHugEnv(render_mode=None, horizon=config.horizon, stage=config.stage)
+                print("Video recording not available (render returned None)")
+        except Exception as e:
+            if eval_env:
+                eval_env.close()
+            eval_env = HumanoidHugEnv(render_mode=None, horizon=config.horizon, stage=config.stage)
+            print(f"Video recording not available: {e}")
+            print("Eval episodes will run without video.")
     else:
+        eval_env = HumanoidHugEnv(render_mode=None, horizon=config.horizon, stage=config.stage)
         print("Warning: imageio not installed. Videos will not be recorded.")
         print("  Install with: pip install imageio imageio-ffmpeg")
     
@@ -691,25 +667,23 @@ def train(config: PPOConfig, checkpoint_dir: str, experiment_name: str):
             }, checkpoint_path)
             tqdm.write(f"Saved checkpoint: {checkpoint_path}")
             
-            # Record evaluation episode (video if rendering available)
-            if HAS_IMAGEIO:
-                video_dir = log_dir / "videos"
-                video_dir.mkdir(exist_ok=True)
-                video_path = video_dir / f"episode_{update}.mp4"
-                
-                vid_reward, vid_length, vid_reason = record_episode(
-                    agents, config, device, str(video_path), deterministic=True
-                )
-                
-                # Check if video was actually saved
-                if "_no_video" in vid_reason:
-                    tqdm.write(f"Eval episode: reward={vid_reward:.1f}, len={vid_length}, {vid_reason.replace('_no_video', '')} (no video - headless)")
-                else:
-                    tqdm.write(f"Saved video: {video_path} (reward={vid_reward:.1f}, len={vid_length}, {vid_reason})")
-                
-                # Log eval metrics
-                writer.add_scalar("eval/episode_reward", vid_reward, global_step)
-                writer.add_scalar("eval/episode_length", vid_length, global_step)
+            # Run evaluation episode (with video if rendering available)
+            video_dir = log_dir / "videos"
+            video_dir.mkdir(exist_ok=True)
+            video_path = video_dir / f"episode_{update}.mp4" if can_record_video else None
+            
+            vid_reward, vid_length, vid_reason, video_saved = run_eval_episode(
+                agents, eval_env, device, str(video_path) if video_path else None, deterministic=True
+            )
+            
+            if video_saved:
+                tqdm.write(f"Saved video: {video_path} (reward={vid_reward:.1f}, len={vid_length}, {vid_reason})")
+            else:
+                tqdm.write(f"Eval episode: reward={vid_reward:.1f}, len={vid_length}, {vid_reason}")
+            
+            # Log eval metrics
+            writer.add_scalar("eval/episode_reward", vid_reward, global_step)
+            writer.add_scalar("eval/episode_length", vid_length, global_step)
     
     # Final save
     final_path = log_dir / "final_model.pt"
@@ -725,6 +699,8 @@ def train(config: PPOConfig, checkpoint_dir: str, experiment_name: str):
     # Cleanup
     writer.close()
     envs.close()
+    if eval_env:
+        eval_env.close()
 
 
 def main():
