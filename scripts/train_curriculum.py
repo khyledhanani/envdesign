@@ -123,6 +123,7 @@ def create_config(
         "fcnet_activation": "tanh",
         "free_log_std": True,
         "vf_share_layers": False,
+        "max_seq_len": 20,  # Required for old API stack
     }
     
     return config
@@ -198,7 +199,7 @@ def train_curriculum(
         
         # Create new algorithm or update existing
         if algo is None:
-            algo = config.build()
+            algo = config.build_algo()
         else:
             # Update environment config for new stage
             algo.config.env_config["stage"] = current_stage

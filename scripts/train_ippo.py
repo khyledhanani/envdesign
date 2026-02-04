@@ -186,6 +186,7 @@ def create_ippo_config(
         "fcnet_activation": "tanh",
         "free_log_std": True,
         "vf_share_layers": False,
+        "max_seq_len": 20,  # Required for old API stack
     }
     
     # Multi-agent configuration
