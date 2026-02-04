@@ -255,7 +255,11 @@ def step_env(
     
     def maybe_reset(d, reset_flag, r):
         new_d = _reset_single(r)
-        return jax.lax.select(reset_flag, new_d, d)
+        # Use tree_map to select between pytrees element-wise
+        return jax.tree.map(
+            lambda old, new: jnp.where(reset_flag, new, old),
+            d, new_d
+        )
     
     data = jax.vmap(maybe_reset)(data, done, reset_rngs)
     new_step = jnp.where(done, 0, new_step)
