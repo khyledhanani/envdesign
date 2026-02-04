@@ -446,6 +446,40 @@ def sample_action(rng, state, obs):
     return action, log_prob, value.squeeze(-1)
 
 
+@functools.partial(jax.jit, static_argnums=(3,))
+def collect_rollout(
+    rng: jax.Array,
+    env_state: EnvState,
+    obs: Dict[str, jax.Array],
+    num_steps: int,
+    h0_state: TrainState,
+    h1_state: TrainState,
+) -> Tuple[jax.Array, EnvState, Dict[str, jax.Array], Transition, Transition]:
+    """Collect a rollout on-device using lax.scan (fast)."""
+    def rollout_step(carry, _):
+        rng, env_state, obs = carry
+        rng, r1, r2 = jax.random.split(rng, 3)
+
+        h0_act, h0_lp, h0_val = sample_action(r1, h0_state, obs["h0"])
+        h1_act, h1_lp, h1_val = sample_action(r2, h1_state, obs["h1"])
+
+        env_state, next_obs, rewards, dones, _ = step_env(env_state, h0_act, h1_act)
+
+        h0_trans = Transition(obs["h0"], h0_act, rewards, dones, h0_val, h0_lp)
+        h1_trans = Transition(obs["h1"], h1_act, rewards, dones, h1_val, h1_lp)
+
+        return (rng, env_state, next_obs), (h0_trans, h1_trans)
+
+    (rng, env_state, obs), (h0_traj, h1_traj) = jax.lax.scan(
+        rollout_step,
+        (rng, env_state, obs),
+        None,
+        length=num_steps,
+    )
+
+    return rng, env_state, obs, h0_traj, h1_traj
+
+
 @jax.jit
 def compute_gae(rewards, values, dones, last_val, gamma, lam):
     def scan_fn(carry, t):
@@ -537,26 +571,11 @@ def train(config: MJXConfig, checkpoint_dir: str, experiment_name: str):
     for update in pbar:
         update_start = time.time()
         
-        # Collect rollout
-        h0_trans, h1_trans = [], []
-        
-        for _ in range(config.num_steps):
-            rng, r1, r2 = jax.random.split(rng, 3)
-            
-            h0_act, h0_lp, h0_val = sample_action(r1, h0_state, obs["h0"])
-            h1_act, h1_lp, h1_val = sample_action(r2, h1_state, obs["h1"])
-            
-            env_state, next_obs, rewards, dones, _ = step_env(env_state, h0_act, h1_act)
-            
-            h0_trans.append(Transition(obs["h0"], h0_act, rewards, dones, h0_val, h0_lp))
-            h1_trans.append(Transition(obs["h1"], h1_act, rewards, dones, h1_val, h1_lp))
-            
-            obs = next_obs
-            global_step += config.num_envs
-        
-        # Stack
-        h0_batch = Transition(*[jnp.stack([t[i] for t in h0_trans]) for i in range(6)])
-        h1_batch = Transition(*[jnp.stack([t[i] for t in h1_trans]) for i in range(6)])
+        # Collect rollout (on-device, fast)
+        rng, env_state, obs, h0_batch, h1_batch = collect_rollout(
+            rng, env_state, obs, config.num_steps, h0_state, h1_state
+        )
+        global_step += config.num_envs * config.num_steps
         
         # GAE
         rng, r1, r2 = jax.random.split(rng, 3)
@@ -585,6 +604,8 @@ def train(config: MJXConfig, checkpoint_dir: str, experiment_name: str):
         h0_state = ppo_update(h0_state, h0_ppo, r1, config.num_epochs, config.minibatch_size)
         h1_state = ppo_update(h1_state, h1_ppo, r2, config.num_epochs, config.minibatch_size)
         
+        # Ensure all device work is finished before timing
+        jax.block_until_ready(h0_state.params)
         fps = config.batch_size / (time.time() - update_start)
         mean_rew = float(jnp.mean(h0_batch.reward))
         
