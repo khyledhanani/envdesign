@@ -1,0 +1,286 @@
+<mujoco model="humanoid_hug">
+  <compiler angle="degree" inertiafromgeom="true"/>
+  <option timestep="0.005" iterations="50" tolerance="1e-10" solver="Newton" jacobian="dense" cone="pyramidal"/>
+
+  <size nstack="3000000" nuser_body="1"/>
+
+  <default>
+    <joint armature="1" damping="1" limited="true"/>
+    <geom conaffinity="1" condim="3" friction="0.8 0.1 0.1" margin="0.001" material="geom"/>
+    <motor ctrlrange="-1 1" ctrllimited="true"/>
+  </default>
+
+  <asset>
+    <texture type="skybox" builtin="gradient" rgb1="0.3 0.5 0.7" rgb2="0 0 0" width="512" height="3072"/>
+    <texture type="2d" name="groundplane" builtin="checker" mark="edge" rgb1="0.2 0.3 0.4" rgb2="0.1 0.2 0.3" markrgb="0.8 0.8 0.8" width="300" height="300"/>
+    <material name="groundplane" texture="groundplane" texuniform="true" texrepeat="5 5" reflectance="0.2"/>
+    <material name="geom" rgba="0.8 0.6 0.4 1"/>
+    <material name="h0_mat" rgba="0.2 0.6 0.8 1"/>
+    <material name="h1_mat" rgba="0.8 0.4 0.2 1"/>
+  </asset>
+
+  <worldbody>
+    <light cutoff="100" diffuse="1 1 1" dir="-0 0 -1.3" directional="true" exponent="1" pos="0 0 1.3" specular="0.1 0.1 0.1"/>
+    <geom conaffinity="1" condim="3" name="floor" pos="0 0 0" rgba="0.8 0.9 0.8 1" size="40 40 0.1" type="plane" material="groundplane"/>
+
+    <!-- ==================== HUMANOID 0 (h0) ==================== -->
+    <body name="h0_torso" pos="-1.0 0 1.4">
+      <camera name="h0_track" mode="trackcom" pos="0 -4 0" xyaxes="1 0 0 0 0 1"/>
+      <freejoint name="h0_root"/>
+
+      <!-- Torso geoms -->
+      <geom name="h0_torso_geom" fromto="0 -0.07 0 0 0.07 0" size="0.07" type="capsule" material="h0_mat"/>
+      <geom name="h0_chest_geom" fromto="0 -0.06 0.15 0 0.06 0.15" size="0.06" type="capsule" material="h0_mat"/>
+      <geom name="h0_abdomen_geom" fromto="0 -0.05 -0.1 0 0.05 -0.1" size="0.05" type="capsule" material="h0_mat"/>
+
+      <!-- Sites for hug detection -->
+      <site name="h0_chest" pos="0 0 0.15" size="0.02" rgba="1 0 0 0.5"/>
+      <site name="h0_pelvis" pos="0 0 -0.2" size="0.02" rgba="1 0 0 0.5"/>
+      <site name="h0_back" pos="-0.08 0 0.05" size="0.02" rgba="1 0 0 0.5"/>
+
+      <!-- Head -->
+      <body name="h0_head" pos="0 0 0.25">
+        <joint name="h0_head_yaw" type="hinge" axis="0 0 1" range="-50 50" armature="0.02" damping="0.1" stiffness="5"/>
+        <joint name="h0_head_pitch" type="hinge" axis="0 1 0" range="-30 30" armature="0.02" damping="0.1" stiffness="5"/>
+        <geom name="h0_head_geom" type="sphere" size="0.09" material="h0_mat"/>
+        <site name="h0_head_site" pos="0 0 0.05" size="0.02" rgba="1 0 0 0.5"/>
+      </body>
+
+      <!-- Left Upper Arm -->
+      <body name="h0_left_upper_arm" pos="0 0.17 0.12">
+        <joint name="h0_left_shoulder1" type="hinge" axis="2 1 1" range="-85 60" armature="0.0068"/>
+        <joint name="h0_left_shoulder2" type="hinge" axis="0 -1 1" range="-85 60" armature="0.0051"/>
+        <geom name="h0_left_upper_arm_geom" fromto="0 0 0 0.16 0.16 -0.16" size="0.04" type="capsule" material="h0_mat"/>
+
+        <!-- Left Lower Arm -->
+        <body name="h0_left_lower_arm" pos="0.16 0.16 -0.16">
+          <joint name="h0_left_elbow" type="hinge" axis="0 -1 1" range="-90 50" stiffness="0" armature="0.0028"/>
+          <geom name="h0_left_lower_arm_geom" fromto="0.01 0.01 0.01 0.17 0.17 0.17" size="0.031" type="capsule" material="h0_mat"/>
+
+          <!-- Left Hand -->
+          <body name="h0_left_hand" pos="0.18 0.18 0.18">
+            <geom name="h0_left_hand_geom" type="sphere" size="0.04" material="h0_mat"/>
+            <site name="h0_lhand" pos="0 0 0" size="0.02" rgba="0 1 0 0.5"/>
+          </body>
+        </body>
+      </body>
+
+      <!-- Right Upper Arm -->
+      <body name="h0_right_upper_arm" pos="0 -0.17 0.12">
+        <joint name="h0_right_shoulder1" type="hinge" axis="2 -1 1" range="-60 85" armature="0.0068"/>
+        <joint name="h0_right_shoulder2" type="hinge" axis="0 1 1" range="-60 85" armature="0.0051"/>
+        <geom name="h0_right_upper_arm_geom" fromto="0 0 0 0.16 -0.16 -0.16" size="0.04" type="capsule" material="h0_mat"/>
+
+        <!-- Right Lower Arm -->
+        <body name="h0_right_lower_arm" pos="0.16 -0.16 -0.16">
+          <joint name="h0_right_elbow" type="hinge" axis="0 -1 -1" range="-90 50" stiffness="0" armature="0.0028"/>
+          <geom name="h0_right_lower_arm_geom" fromto="0.01 -0.01 0.01 0.17 -0.17 0.17" size="0.031" type="capsule" material="h0_mat"/>
+
+          <!-- Right Hand -->
+          <body name="h0_right_hand" pos="0.18 -0.18 0.18">
+            <geom name="h0_right_hand_geom" type="sphere" size="0.04" material="h0_mat"/>
+            <site name="h0_rhand" pos="0 0 0" size="0.02" rgba="0 1 0 0.5"/>
+          </body>
+        </body>
+      </body>
+
+      <!-- Lower body (pelvis) -->
+      <body name="h0_lower_body" pos="0 0 -0.2">
+        <joint name="h0_abdomen_z" type="hinge" axis="0 0 1" range="-45 45" armature="0.02"/>
+        <joint name="h0_abdomen_y" type="hinge" axis="0 1 0" range="-75 30" armature="0.02"/>
+        <geom name="h0_pelvis_geom" fromto="-0.02 -0.07 0 -0.02 0.07 0" size="0.09" type="capsule" material="h0_mat"/>
+
+        <!-- Left Thigh -->
+        <body name="h0_left_thigh" pos="0 0.1 -0.04">
+          <joint name="h0_left_hip_x" type="hinge" axis="1 0 0" range="-25 5" armature="0.01"/>
+          <joint name="h0_left_hip_z" type="hinge" axis="0 0 1" range="-60 35" armature="0.01"/>
+          <joint name="h0_left_hip_y" type="hinge" axis="0 1 0" range="-110 20" armature="0.01"/>
+          <geom name="h0_left_thigh_geom" fromto="0 0 0 0 0.01 -0.34" size="0.06" type="capsule" material="h0_mat"/>
+
+          <!-- Left Shin -->
+          <body name="h0_left_shin" pos="0 0.01 -0.403">
+            <joint name="h0_left_knee" type="hinge" axis="0 1 0" range="-160 -2" armature="0.006"/>
+            <geom name="h0_left_shin_geom" fromto="0 0 0 0 0 -0.3" size="0.049" type="capsule" material="h0_mat"/>
+
+            <!-- Left Foot -->
+            <body name="h0_left_foot" pos="0 0 -0.35">
+              <joint name="h0_left_ankle" type="hinge" axis="0 1 0" range="-50 50" armature="0.008"/>
+              <geom name="h0_left_foot_geom" fromto="-0.07 -0.02 0 0.14 -0.04 0" size="0.027" type="capsule" material="h0_mat"/>
+            </body>
+          </body>
+        </body>
+
+        <!-- Right Thigh -->
+        <body name="h0_right_thigh" pos="0 -0.1 -0.04">
+          <joint name="h0_right_hip_x" type="hinge" axis="-1 0 0" range="-25 5" armature="0.01"/>
+          <joint name="h0_right_hip_z" type="hinge" axis="0 0 -1" range="-60 35" armature="0.01"/>
+          <joint name="h0_right_hip_y" type="hinge" axis="0 1 0" range="-110 20" armature="0.01"/>
+          <geom name="h0_right_thigh_geom" fromto="0 0 0 0 -0.01 -0.34" size="0.06" type="capsule" material="h0_mat"/>
+
+          <!-- Right Shin -->
+          <body name="h0_right_shin" pos="0 -0.01 -0.403">
+            <joint name="h0_right_knee" type="hinge" axis="0 1 0" range="-160 -2" armature="0.006"/>
+            <geom name="h0_right_shin_geom" fromto="0 0 0 0 0 -0.3" size="0.049" type="capsule" material="h0_mat"/>
+
+            <!-- Right Foot -->
+            <body name="h0_right_foot" pos="0 0 -0.35">
+              <joint name="h0_right_ankle" type="hinge" axis="0 1 0" range="-50 50" armature="0.008"/>
+              <geom name="h0_right_foot_geom" fromto="-0.07 0.02 0 0.14 0.04 0" size="0.027" type="capsule" material="h0_mat"/>
+            </body>
+          </body>
+        </body>
+      </body>
+    </body>
+
+    <!-- ==================== HUMANOID 1 (h1) ==================== -->
+    <body name="h1_torso" pos="1.0 0 1.4">
+      <camera name="h1_track" mode="trackcom" pos="0 -4 0" xyaxes="1 0 0 0 0 1"/>
+      <freejoint name="h1_root"/>
+
+      <!-- Torso geoms -->
+      <geom name="h1_torso_geom" fromto="0 -0.07 0 0 0.07 0" size="0.07" type="capsule" material="h1_mat"/>
+      <geom name="h1_chest_geom" fromto="0 -0.06 0.15 0 0.06 0.15" size="0.06" type="capsule" material="h1_mat"/>
+      <geom name="h1_abdomen_geom" fromto="0 -0.05 -0.1 0 0.05 -0.1" size="0.05" type="capsule" material="h1_mat"/>
+
+      <!-- Sites for hug detection -->
+      <site name="h1_chest" pos="0 0 0.15" size="0.02" rgba="1 0 0 0.5"/>
+      <site name="h1_pelvis" pos="0 0 -0.2" size="0.02" rgba="1 0 0 0.5"/>
+      <site name="h1_back" pos="-0.08 0 0.05" size="0.02" rgba="1 0 0 0.5"/>
+
+      <!-- Head -->
+      <body name="h1_head" pos="0 0 0.25">
+        <joint name="h1_head_yaw" type="hinge" axis="0 0 1" range="-50 50" armature="0.02" damping="0.1" stiffness="5"/>
+        <joint name="h1_head_pitch" type="hinge" axis="0 1 0" range="-30 30" armature="0.02" damping="0.1" stiffness="5"/>
+        <geom name="h1_head_geom" type="sphere" size="0.09" material="h1_mat"/>
+        <site name="h1_head_site" pos="0 0 0.05" size="0.02" rgba="1 0 0 0.5"/>
+      </body>
+
+      <!-- Left Upper Arm -->
+      <body name="h1_left_upper_arm" pos="0 0.17 0.12">
+        <joint name="h1_left_shoulder1" type="hinge" axis="2 1 1" range="-85 60" armature="0.0068"/>
+        <joint name="h1_left_shoulder2" type="hinge" axis="0 -1 1" range="-85 60" armature="0.0051"/>
+        <geom name="h1_left_upper_arm_geom" fromto="0 0 0 0.16 0.16 -0.16" size="0.04" type="capsule" material="h1_mat"/>
+
+        <!-- Left Lower Arm -->
+        <body name="h1_left_lower_arm" pos="0.16 0.16 -0.16">
+          <joint name="h1_left_elbow" type="hinge" axis="0 -1 1" range="-90 50" stiffness="0" armature="0.0028"/>
+          <geom name="h1_left_lower_arm_geom" fromto="0.01 0.01 0.01 0.17 0.17 0.17" size="0.031" type="capsule" material="h1_mat"/>
+
+          <!-- Left Hand -->
+          <body name="h1_left_hand" pos="0.18 0.18 0.18">
+            <geom name="h1_left_hand_geom" type="sphere" size="0.04" material="h1_mat"/>
+            <site name="h1_lhand" pos="0 0 0" size="0.02" rgba="0 1 0 0.5"/>
+          </body>
+        </body>
+      </body>
+
+      <!-- Right Upper Arm -->
+      <body name="h1_right_upper_arm" pos="0 -0.17 0.12">
+        <joint name="h1_right_shoulder1" type="hinge" axis="2 -1 1" range="-60 85" armature="0.0068"/>
+        <joint name="h1_right_shoulder2" type="hinge" axis="0 1 1" range="-60 85" armature="0.0051"/>
+        <geom name="h1_right_upper_arm_geom" fromto="0 0 0 0.16 -0.16 -0.16" size="0.04" type="capsule" material="h1_mat"/>
+
+        <!-- Right Lower Arm -->
+        <body name="h1_right_lower_arm" pos="0.16 -0.16 -0.16">
+          <joint name="h1_right_elbow" type="hinge" axis="0 -1 -1" range="-90 50" stiffness="0" armature="0.0028"/>
+          <geom name="h1_right_lower_arm_geom" fromto="0.01 -0.01 0.01 0.17 -0.17 0.17" size="0.031" type="capsule" material="h1_mat"/>
+
+          <!-- Right Hand -->
+          <body name="h1_right_hand" pos="0.18 -0.18 0.18">
+            <geom name="h1_right_hand_geom" type="sphere" size="0.04" material="h1_mat"/>
+            <site name="h1_rhand" pos="0 0 0" size="0.02" rgba="0 1 0 0.5"/>
+          </body>
+        </body>
+      </body>
+
+      <!-- Lower body (pelvis) -->
+      <body name="h1_lower_body" pos="0 0 -0.2">
+        <joint name="h1_abdomen_z" type="hinge" axis="0 0 1" range="-45 45" armature="0.02"/>
+        <joint name="h1_abdomen_y" type="hinge" axis="0 1 0" range="-75 30" armature="0.02"/>
+        <geom name="h1_pelvis_geom" fromto="-0.02 -0.07 0 -0.02 0.07 0" size="0.09" type="capsule" material="h1_mat"/>
+
+        <!-- Left Thigh -->
+        <body name="h1_left_thigh" pos="0 0.1 -0.04">
+          <joint name="h1_left_hip_x" type="hinge" axis="1 0 0" range="-25 5" armature="0.01"/>
+          <joint name="h1_left_hip_z" type="hinge" axis="0 0 1" range="-60 35" armature="0.01"/>
+          <joint name="h1_left_hip_y" type="hinge" axis="0 1 0" range="-110 20" armature="0.01"/>
+          <geom name="h1_left_thigh_geom" fromto="0 0 0 0 0.01 -0.34" size="0.06" type="capsule" material="h1_mat"/>
+
+          <!-- Left Shin -->
+          <body name="h1_left_shin" pos="0 0.01 -0.403">
+            <joint name="h1_left_knee" type="hinge" axis="0 1 0" range="-160 -2" armature="0.006"/>
+            <geom name="h1_left_shin_geom" fromto="0 0 0 0 0 -0.3" size="0.049" type="capsule" material="h1_mat"/>
+
+            <!-- Left Foot -->
+            <body name="h1_left_foot" pos="0 0 -0.35">
+              <joint name="h1_left_ankle" type="hinge" axis="0 1 0" range="-50 50" armature="0.008"/>
+              <geom name="h1_left_foot_geom" fromto="-0.07 -0.02 0 0.14 -0.04 0" size="0.027" type="capsule" material="h1_mat"/>
+            </body>
+          </body>
+        </body>
+
+        <!-- Right Thigh -->
+        <body name="h1_right_thigh" pos="0 -0.1 -0.04">
+          <joint name="h1_right_hip_x" type="hinge" axis="-1 0 0" range="-25 5" armature="0.01"/>
+          <joint name="h1_right_hip_z" type="hinge" axis="0 0 -1" range="-60 35" armature="0.01"/>
+          <joint name="h1_right_hip_y" type="hinge" axis="0 1 0" range="-110 20" armature="0.01"/>
+          <geom name="h1_right_thigh_geom" fromto="0 0 0 0 -0.01 -0.34" size="0.06" type="capsule" material="h1_mat"/>
+
+          <!-- Right Shin -->
+          <body name="h1_right_shin" pos="0 -0.01 -0.403">
+            <joint name="h1_right_knee" type="hinge" axis="0 1 0" range="-160 -2" armature="0.006"/>
+            <geom name="h1_right_shin_geom" fromto="0 0 0 0 0 -0.3" size="0.049" type="capsule" material="h1_mat"/>
+
+            <!-- Right Foot -->
+            <body name="h1_right_foot" pos="0 0 -0.35">
+              <joint name="h1_right_ankle" type="hinge" axis="0 1 0" range="-50 50" armature="0.008"/>
+              <geom name="h1_right_foot_geom" fromto="-0.07 0.02 0 0.14 0.04 0" size="0.027" type="capsule" material="h1_mat"/>
+            </body>
+          </body>
+        </body>
+      </body>
+    </body>
+  </worldbody>
+
+  <actuator>
+    <!-- Humanoid 0 actuators (21 total) -->
+    <motor name="h0_abdomen_z" joint="h0_abdomen_z" gear="100" ctrlrange="-1 1"/>
+    <motor name="h0_abdomen_y" joint="h0_abdomen_y" gear="100" ctrlrange="-1 1"/>
+    <motor name="h0_left_hip_x" joint="h0_left_hip_x" gear="100" ctrlrange="-1 1"/>
+    <motor name="h0_left_hip_z" joint="h0_left_hip_z" gear="100" ctrlrange="-1 1"/>
+    <motor name="h0_left_hip_y" joint="h0_left_hip_y" gear="100" ctrlrange="-1 1"/>
+    <motor name="h0_left_knee" joint="h0_left_knee" gear="100" ctrlrange="-1 1"/>
+    <motor name="h0_left_ankle" joint="h0_left_ankle" gear="100" ctrlrange="-1 1"/>
+    <motor name="h0_right_hip_x" joint="h0_right_hip_x" gear="100" ctrlrange="-1 1"/>
+    <motor name="h0_right_hip_z" joint="h0_right_hip_z" gear="100" ctrlrange="-1 1"/>
+    <motor name="h0_right_hip_y" joint="h0_right_hip_y" gear="100" ctrlrange="-1 1"/>
+    <motor name="h0_right_knee" joint="h0_right_knee" gear="100" ctrlrange="-1 1"/>
+    <motor name="h0_right_ankle" joint="h0_right_ankle" gear="100" ctrlrange="-1 1"/>
+    <motor name="h0_left_shoulder1" joint="h0_left_shoulder1" gear="25" ctrlrange="-1 1"/>
+    <motor name="h0_left_shoulder2" joint="h0_left_shoulder2" gear="25" ctrlrange="-1 1"/>
+    <motor name="h0_left_elbow" joint="h0_left_elbow" gear="25" ctrlrange="-1 1"/>
+    <motor name="h0_right_shoulder1" joint="h0_right_shoulder1" gear="25" ctrlrange="-1 1"/>
+    <motor name="h0_right_shoulder2" joint="h0_right_shoulder2" gear="25" ctrlrange="-1 1"/>
+    <motor name="h0_right_elbow" joint="h0_right_elbow" gear="25" ctrlrange="-1 1"/>
+
+    <!-- Humanoid 1 actuators (21 total) -->
+    <motor name="h1_abdomen_z" joint="h1_abdomen_z" gear="100" ctrlrange="-1 1"/>
+    <motor name="h1_abdomen_y" joint="h1_abdomen_y" gear="100" ctrlrange="-1 1"/>
+    <motor name="h1_left_hip_x" joint="h1_left_hip_x" gear="100" ctrlrange="-1 1"/>
+    <motor name="h1_left_hip_z" joint="h1_left_hip_z" gear="100" ctrlrange="-1 1"/>
+    <motor name="h1_left_hip_y" joint="h1_left_hip_y" gear="100" ctrlrange="-1 1"/>
+    <motor name="h1_left_knee" joint="h1_left_knee" gear="100" ctrlrange="-1 1"/>
+    <motor name="h1_left_ankle" joint="h1_left_ankle" gear="100" ctrlrange="-1 1"/>
+    <motor name="h1_right_hip_x" joint="h1_right_hip_x" gear="100" ctrlrange="-1 1"/>
+    <motor name="h1_right_hip_z" joint="h1_right_hip_z" gear="100" ctrlrange="-1 1"/>
+    <motor name="h1_right_hip_y" joint="h1_right_hip_y" gear="100" ctrlrange="-1 1"/>
+    <motor name="h1_right_knee" joint="h1_right_knee" gear="100" ctrlrange="-1 1"/>
+    <motor name="h1_right_ankle" joint="h1_right_ankle" gear="100" ctrlrange="-1 1"/>
+    <motor name="h1_left_shoulder1" joint="h1_left_shoulder1" gear="25" ctrlrange="-1 1"/>
+    <motor name="h1_left_shoulder2" joint="h1_left_shoulder2" gear="25" ctrlrange="-1 1"/>
+    <motor name="h1_left_elbow" joint="h1_left_elbow" gear="25" ctrlrange="-1 1"/>
+    <motor name="h1_right_shoulder1" joint="h1_right_shoulder1" gear="25" ctrlrange="-1 1"/>
+    <motor name="h1_right_shoulder2" joint="h1_right_shoulder2" gear="25" ctrlrange="-1 1"/>
+    <motor name="h1_right_elbow" joint="h1_right_elbow" gear="25" ctrlrange="-1 1"/>
+  </actuator>
+</mujoco>

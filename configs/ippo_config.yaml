@@ -1,0 +1,117 @@
+# IPPO Training Configuration for Humanoid Hug
+# ==============================================
+# Use with: python scripts/train_ippo.py --config configs/ippo_config.yaml
+# Or override individual params: python scripts/train_ippo.py --lr 1e-4 --num-workers 8
+
+# ============================================
+# QUICK START CONFIGURATIONS
+# ============================================
+# 
+# LOCAL CPU (laptop/desktop without GPU):
+#   python scripts/train_ippo.py --num-workers 2 --num-gpus 0 --train-batch-size 2000
+#
+# LOCAL GPU (single GPU):
+#   python scripts/train_ippo.py --num-workers 4 --num-gpus 1 --train-batch-size 4000
+#
+# CLOUD/CLUSTER (multi-GPU):
+#   python scripts/train_ippo.py --num-workers 16 --num-gpus 2 --train-batch-size 16000
+#
+# ============================================
+
+# Environment Configuration
+environment:
+  stage: 0                    # Curriculum stage (0-3). Start with 0!
+  horizon: 1000               # Max steps per episode
+  frame_skip: 5               # Physics steps per action
+  hug_hold_target: 30         # Steps to hold hug for success
+
+# Training Configuration  
+training:
+  # Resource allocation
+  num_workers: 4              # Parallel rollout workers (set based on CPU cores)
+  num_gpus: 0                 # GPUs for training (0 = CPU only)
+  
+  # Batch sizes
+  train_batch_size: 4000      # Total samples per training iteration
+  minibatch_size: 256         # Minibatch size for gradient updates (sgd_minibatch_size in Ray 2.53+)
+  num_epochs: 10              # SGD epochs per training iteration (num_sgd_iter in Ray 2.53+)
+  
+  # Optimization
+  lr: 3e-4                    # Learning rate (3e-4 is a good starting point)
+  gamma: 0.99                 # Discount factor
+  gae_lambda: 0.95            # GAE lambda for advantage estimation
+  
+  # PPO specific
+  clip_param: 0.2             # PPO clipping parameter
+  entropy_coeff: 0.01         # Entropy bonus (encourages exploration)
+  vf_loss_coeff: 0.5          # Value function loss weight
+  grad_clip: 0.5              # Gradient clipping norm
+
+# Policy Configuration
+policy:
+  share_policy: false         # false = IPPO (independent), true = parameter sharing
+  fcnet_hiddens: [256, 256]   # Hidden layer sizes (can try [512, 512] for more capacity)
+  activation: tanh            # Activation function
+
+# Stopping Criteria (training ends when ANY is reached)
+stopping:
+  max_iterations: 1000        # Maximum training iterations
+  max_timesteps: 10000000     # Maximum environment timesteps (10M)
+  target_reward: 200          # Stop if mean reward reaches this
+
+# Checkpointing
+checkpointing:
+  checkpoint_dir: ./checkpoints
+  checkpoint_freq: 50         # Save every N iterations
+  experiment_name: humanoid_hug_ippo
+
+# ============================================
+# CURRICULUM TRAINING GUIDE
+# ============================================
+#
+# Stage 0 (Approach): ~1-2M timesteps
+#   - Agents learn to walk toward each other
+#   - Expected reward: 20-40
+#   - Move to Stage 1 when approach is stable
+#
+# Stage 1 (Reach): ~2-3M timesteps  
+#   - Agents learn to reach arms toward partner
+#   - Expected reward: 40-60
+#   - Move to Stage 2 when reaching is consistent
+#
+# Stage 2 (Contact): ~3-5M timesteps
+#   - Agents learn arm-to-torso contact
+#   - Expected reward: 60-100
+#   - Move to Stage 3 when contacts happen regularly
+#
+# Stage 3 (Full Hug): ~5-10M timesteps
+#   - Full hugging with stability requirement
+#   - Expected reward: 100-200+
+#   - Success = held hug for 30+ steps
+#
+# Total expected training: 10-20M timesteps for convergence
+#
+# ============================================
+# HYPERPARAMETER TUNING TIPS
+# ============================================
+#
+# If agents fall too often:
+#   - Reduce lr to 1e-4
+#   - Increase entropy_coeff to 0.02
+#   - Try smaller actions by adjusting env rewards
+#
+# If training is unstable:
+#   - Reduce clip_param to 0.1
+#   - Increase train_batch_size
+#   - Reduce lr
+#
+# If learning is too slow:
+#   - Increase num_workers
+#   - Increase train_batch_size
+#   - Try larger network [512, 512] or [256, 256, 256]
+#
+# If agents don't explore enough:
+#   - Increase entropy_coeff to 0.02-0.05
+#   - Increase num_sgd_iter
+#
+# ============================================

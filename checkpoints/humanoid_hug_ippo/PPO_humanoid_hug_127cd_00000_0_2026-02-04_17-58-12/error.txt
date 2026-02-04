@@ -1,0 +1,21 @@
+Failure # 1 (occurred at 2026-02-04_17-58-16)
+The actor died because of an error raised in its creation task, [36mray::PPO.__init__()[39m (pid=56960, ip=127.0.0.1, actor_id=10f47de7fc115fadc54edefe01000000, repr=PPO(env=humanoid_hug; env-runners=2; learners=0; multi-agent=True))
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/khyledhanani/miniconda3/envs/hugger/lib/python3.12/site-packages/ray/rllib/algorithms/algorithm.py", line 579, in __init__
+    super().__init__(
+  File "/Users/khyledhanani/miniconda3/envs/hugger/lib/python3.12/site-packages/ray/tune/trainable/trainable.py", line 158, in __init__
+    self.setup(copy.deepcopy(self.config))
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/khyledhanani/miniconda3/envs/hugger/lib/python3.12/site-packages/ray/rllib/algorithms/algorithm.py", line 825, in setup
+    self.env_runner_group = EnvRunnerGroup(
+                            ^^^^^^^^^^^^^^^
+  File "/Users/khyledhanani/miniconda3/envs/hugger/lib/python3.12/site-packages/ray/rllib/env/env_runner_group.py", line 197, in __init__
+    self._setup(
+  File "/Users/khyledhanani/miniconda3/envs/hugger/lib/python3.12/site-packages/ray/rllib/env/env_runner_group.py", line 285, in _setup
+    spaces = self.get_spaces()
+             ^^^^^^^^^^^^^^^^^
+  File "/Users/khyledhanani/miniconda3/envs/hugger/lib/python3.12/site-packages/ray/rllib/env/env_runner_group.py", line 313, in get_spaces
+    spaces = self.foreach_env_runner(
+             ^^^^^^^^^^^^^^^^^^^^^^^^
+IndexError: list index out of range

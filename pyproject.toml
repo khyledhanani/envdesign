@@ -1,0 +1,62 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "humanoid_hug"
+version = "0.1.0"
+description = "Two-agent humanoid hugging environment using MuJoCo and PettingZoo"
+readme = "README.md"
+requires-python = ">=3.9"
+license = {text = "MIT"}
+authors = [
+    {name = "Humanoid Hug Team"}
+]
+keywords = ["reinforcement-learning", "mujoco", "multi-agent", "pettingzoo", "humanoid"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+dependencies = [
+    "mujoco>=3.0.0",
+    "numpy>=1.21.0",
+    "pettingzoo>=1.24.0",
+    "gymnasium>=0.29.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-cov>=4.0.0",
+]
+train = [
+    "ray[rllib]>=2.0.0",
+    "torch>=2.0.0",
+    "tensorboard>=2.10.0",
+    "imageio>=2.20.0",
+    "imageio-ffmpeg>=0.4.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/humanoid-hug/humanoid_hug"
+Documentation = "https://github.com/humanoid-hug/humanoid_hug#readme"
+Repository = "https://github.com/humanoid-hug/humanoid_hug"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["humanoid_hug*"]
+
+[tool.setuptools.package-data]
+humanoid_hug = ["mjcf/*.xml"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = "-v"
