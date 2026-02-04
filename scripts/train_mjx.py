@@ -83,35 +83,39 @@ class EnvState(NamedTuple):
     rng: jax.Array
 
 
-class EnvParams(NamedTuple):
-    """Static environment parameters."""
-    mjx_model: mjx.Model
-    h0_act_idx: jax.Array
-    h1_act_idx: jax.Array
-    h0_torso_idx: int
-    h1_torso_idx: int
-    h0_qpos_start: int
-    h1_qpos_start: int
-    h0_qvel_start: int
-    h1_qvel_start: int
-    nq: int
-    nv: int
-    nu: int
-    frame_skip: int
-    horizon: int
-    weights: Dict[str, float]
-
-
 # =============================================================================
-# Pure Functions (JIT-friendly)
+# Global Environment State (set once at init)
 # =============================================================================
 
-def make_env_params(model_path: str, frame_skip: int, horizon: int, stage: int) -> Tuple[EnvParams, int, int]:
-    """Create environment parameters from model file."""
-    mj_model = mujoco.MjModel.from_xml_path(model_path)
-    mjx_model = mjx.put_model(mj_model)
+# These are set by init_env() and used by JIT-compiled functions
+_MJX_MODEL: Optional[mjx.Model] = None
+_H0_ACT_IDX: Optional[jax.Array] = None
+_H1_ACT_IDX: Optional[jax.Array] = None
+_H0_TORSO_IDX: int = 0
+_H1_TORSO_IDX: int = 0
+_H0_QPOS_START: int = 0
+_H1_QPOS_START: int = 0
+_H0_QVEL_START: int = 0
+_H1_QVEL_START: int = 0
+_NQ: int = 27
+_NV: int = 26
+_NU: int = 36
+_FRAME_SKIP: int = 5
+_HORIZON: int = 1000
+_WEIGHTS: Dict[str, float] = {}
+
+
+def init_env(model_path: str, frame_skip: int, horizon: int, stage: int) -> Tuple[int, int]:
+    """Initialize environment globals."""
+    global _MJX_MODEL, _H0_ACT_IDX, _H1_ACT_IDX
+    global _H0_TORSO_IDX, _H1_TORSO_IDX
+    global _H0_QPOS_START, _H1_QPOS_START, _H0_QVEL_START, _H1_QVEL_START
+    global _NQ, _NV, _NU, _FRAME_SKIP, _HORIZON, _WEIGHTS
     
-    # Find actuator indices
+    mj_model = mujoco.MjModel.from_xml_path(model_path)
+    _MJX_MODEL = mjx.put_model(mj_model)
+    
+    # Actuator indices
     h0_act, h1_act = [], []
     for i in range(mj_model.nu):
         name = mujoco.mj_id2name(mj_model, mujoco.mjtObj.mjOBJ_ACTUATOR, i)
@@ -119,58 +123,53 @@ def make_env_params(model_path: str, frame_skip: int, horizon: int, stage: int) 
             h0_act.append(i)
         elif name and name.startswith("h1_"):
             h1_act.append(i)
+    _H0_ACT_IDX = jnp.array(h0_act)
+    _H1_ACT_IDX = jnp.array(h1_act)
     
-    # Find body indices
-    h0_torso = mujoco.mj_name2id(mj_model, mujoco.mjtObj.mjOBJ_BODY, "h0_torso")
-    h1_torso = mujoco.mj_name2id(mj_model, mujoco.mjtObj.mjOBJ_BODY, "h1_torso")
+    # Body indices
+    _H0_TORSO_IDX = mujoco.mj_name2id(mj_model, mujoco.mjtObj.mjOBJ_BODY, "h0_torso")
+    _H1_TORSO_IDX = mujoco.mj_name2id(mj_model, mujoco.mjtObj.mjOBJ_BODY, "h1_torso")
     
-    # Find joint qpos/qvel starts
+    # Joint indices
     h0_root = mujoco.mj_name2id(mj_model, mujoco.mjtObj.mjOBJ_JOINT, "h0_root")
     h1_root = mujoco.mj_name2id(mj_model, mujoco.mjtObj.mjOBJ_JOINT, "h1_root")
-    h0_qpos_start = mj_model.jnt_qposadr[h0_root]
-    h1_qpos_start = mj_model.jnt_qposadr[h1_root]
-    h0_qvel_start = mj_model.jnt_dofadr[h0_root]
-    h1_qvel_start = mj_model.jnt_dofadr[h1_root]
+    _H0_QPOS_START = int(mj_model.jnt_qposadr[h0_root])
+    _H1_QPOS_START = int(mj_model.jnt_qposadr[h1_root])
+    _H0_QVEL_START = int(mj_model.jnt_dofadr[h0_root])
+    _H1_QVEL_START = int(mj_model.jnt_dofadr[h1_root])
     
-    # Reward weights by stage
+    _NQ = mj_model.nq // 2
+    _NV = mj_model.nv // 2
+    _NU = mj_model.nu
+    _FRAME_SKIP = frame_skip
+    _HORIZON = horizon
+    
+    # Reward weights
     stage_weights = {
         0: {"dist": 2.0, "facing": 1.0, "stability": 0.5, "contact": 0.0, "success": 100.0},
         1: {"dist": 1.5, "facing": 1.0, "stability": 0.5, "contact": 0.0, "success": 100.0},
         2: {"dist": 1.0, "facing": 0.8, "stability": 0.5, "contact": 3.0, "success": 150.0},
         3: {"dist": 0.5, "facing": 0.5, "stability": 0.3, "contact": 5.0, "success": 200.0},
     }
+    _WEIGHTS = stage_weights.get(stage, stage_weights[0])
     
-    params = EnvParams(
-        mjx_model=mjx_model,
-        h0_act_idx=jnp.array(h0_act),
-        h1_act_idx=jnp.array(h1_act),
-        h0_torso_idx=h0_torso,
-        h1_torso_idx=h1_torso,
-        h0_qpos_start=h0_qpos_start,
-        h1_qpos_start=h1_qpos_start,
-        h0_qvel_start=h0_qvel_start,
-        h1_qvel_start=h1_qvel_start,
-        nq=mj_model.nq // 2,  # per humanoid
-        nv=mj_model.nv // 2,
-        nu=mj_model.nu,
-        frame_skip=frame_skip,
-        horizon=horizon,
-        weights=stage_weights.get(stage, stage_weights[0]),
-    )
-    
-    obs_dim = 68  # Fixed for this env
+    obs_dim = 68
     act_dim = len(h0_act)
     
-    return params, obs_dim, act_dim
+    print(f"  obs_dim={obs_dim}, act_dim={act_dim}")
+    return obs_dim, act_dim
 
 
-@functools.partial(jax.jit, static_argnums=(1, 2))
-def reset_env(rng: jax.Array, params: EnvParams, num_envs: int) -> EnvState:
+# =============================================================================
+# Pure Functions (JIT-friendly, use globals)
+# =============================================================================
+
+def reset_env(rng: jax.Array, num_envs: int) -> EnvState:
     """Reset all environments."""
     rngs = jax.random.split(rng, num_envs + 1)
     rng, reset_rngs = rngs[0], rngs[1:]
     
-    data = jax.vmap(lambda r: _reset_single(r, params))(reset_rngs)
+    data = jax.vmap(_reset_single)(reset_rngs)
     
     return EnvState(
         data=data,
@@ -180,15 +179,14 @@ def reset_env(rng: jax.Array, params: EnvParams, num_envs: int) -> EnvState:
     )
 
 
-def _reset_single(rng: jax.Array, params: EnvParams) -> mjx.Data:
+def _reset_single(rng: jax.Array) -> mjx.Data:
     """Reset a single environment."""
     rng, r1, r2, r3, r4, r5 = jax.random.split(rng, 6)
     
-    data = mjx.make_data(params.mjx_model)
+    data = mjx.make_data(_MJX_MODEL)
     qpos = data.qpos
     qvel = jnp.zeros_like(data.qvel)
     
-    # Random initial distance
     half_dist = jax.random.uniform(r1, minval=0.75, maxval=1.25)
     
     # H0
@@ -196,7 +194,7 @@ def _reset_single(rng: jax.Array, params: EnvParams) -> mjx.Data:
     h0_y = jax.random.uniform(r2, minval=-0.1, maxval=0.1)
     yaw0 = jax.random.uniform(r3, minval=-0.2, maxval=0.2)
     
-    s = params.h0_qpos_start
+    s = _H0_QPOS_START
     qpos = qpos.at[s:s+3].set(jnp.array([h0_x, h0_y, 1.4]))
     qpos = qpos.at[s+3:s+7].set(jnp.array([jnp.cos(yaw0/2), 0, 0, jnp.sin(yaw0/2)]))
     
@@ -205,61 +203,58 @@ def _reset_single(rng: jax.Array, params: EnvParams) -> mjx.Data:
     h1_y = jax.random.uniform(r4, minval=-0.1, maxval=0.1)
     yaw1 = jnp.pi + jax.random.uniform(r5, minval=-0.2, maxval=0.2)
     
-    s = params.h1_qpos_start
+    s = _H1_QPOS_START
     qpos = qpos.at[s:s+3].set(jnp.array([h1_x, h1_y, 1.4]))
     qpos = qpos.at[s+3:s+7].set(jnp.array([jnp.cos(yaw1/2), 0, 0, jnp.sin(yaw1/2)]))
     
     data = data.replace(qpos=qpos, qvel=qvel)
-    return mjx.forward(params.mjx_model, data)
+    return mjx.forward(_MJX_MODEL, data)
 
 
-@functools.partial(jax.jit, static_argnums=(3,))
+@jax.jit
 def step_env(
     state: EnvState,
     h0_act: jax.Array,
     h1_act: jax.Array,
-    params: EnvParams,
 ) -> Tuple[EnvState, Dict[str, jax.Array], jax.Array, jax.Array, Dict]:
     """Step all environments."""
     num_envs = h0_act.shape[0]
     
     # Build control
-    ctrl = jnp.zeros((num_envs, params.nu))
-    ctrl = ctrl.at[:, params.h0_act_idx].set(jnp.clip(h0_act, -1, 1))
-    ctrl = ctrl.at[:, params.h1_act_idx].set(jnp.clip(h1_act, -1, 1))
+    ctrl = jnp.zeros((num_envs, _NU))
+    ctrl = ctrl.at[:, _H0_ACT_IDX].set(jnp.clip(h0_act, -1, 1))
+    ctrl = ctrl.at[:, _H1_ACT_IDX].set(jnp.clip(h1_act, -1, 1))
     
     # Step physics
     data = state.data.replace(ctrl=ctrl)
-    data = jax.vmap(lambda d: _physics_step(d, params))(data)
+    data = jax.vmap(_physics_step)(data)
     
     # Observations
-    obs = _get_obs_batched(data, params)
+    obs = _get_obs_batched(data)
     
     # Hug check
-    hug_ok = jax.vmap(lambda d: _check_hug(d, params))(data)
+    hug_ok = jax.vmap(_check_hug)(data)
     new_hug_hold = jnp.where(hug_ok, state.hug_hold + 1, 0)
     
     # Fallen check
-    fallen = jax.vmap(lambda d: _check_fallen(d, params))(data)
+    fallen = jax.vmap(_check_fallen)(data)
     
     # Success
     success = new_hug_hold >= 30
     
     # Rewards
-    rewards = jax.vmap(lambda d, c, s, f: _compute_reward(d, c, s, f, params))(
-        data, ctrl, success, fallen
-    )
+    rewards = jax.vmap(_compute_reward)(data, ctrl, success, fallen)
     
     # Done
     new_step = state.step_count + 1
-    done = fallen | success | (new_step >= params.horizon)
+    done = fallen | success | (new_step >= _HORIZON)
     
     # Auto-reset
     rng, reset_rng = jax.random.split(state.rng)
     reset_rngs = jax.random.split(reset_rng, num_envs)
     
     def maybe_reset(d, reset_flag, r):
-        new_d = _reset_single(r, params)
+        new_d = _reset_single(r)
         return jax.lax.select(reset_flag, new_d, d)
     
     data = jax.vmap(maybe_reset)(data, done, reset_rngs)
@@ -272,37 +267,35 @@ def step_env(
     return new_state, obs, rewards, done, info
 
 
-def _physics_step(data: mjx.Data, params: EnvParams) -> mjx.Data:
+def _physics_step(data: mjx.Data) -> mjx.Data:
     """Step physics for one env."""
     def do_step(d, _):
-        return mjx.step(params.mjx_model, d), None
-    d, _ = jax.lax.scan(do_step, data, None, length=params.frame_skip)
+        return mjx.step(_MJX_MODEL, d), None
+    d, _ = jax.lax.scan(do_step, data, None, length=_FRAME_SKIP)
     return d
 
 
-def _get_obs_batched(data: mjx.Data, params: EnvParams) -> Dict[str, jax.Array]:
+def _get_obs_batched(data: mjx.Data) -> Dict[str, jax.Array]:
     """Get observations for all envs."""
-    h0_obs = jax.vmap(lambda d: _get_agent_obs(d, params, is_h0=True))(data)
-    h1_obs = jax.vmap(lambda d: _get_agent_obs(d, params, is_h0=False))(data)
+    h0_obs = jax.vmap(lambda d: _get_agent_obs(d, True))(data)
+    h1_obs = jax.vmap(lambda d: _get_agent_obs(d, False))(data)
     return {"h0": h0_obs, "h1": h1_obs}
 
 
-def _get_agent_obs(data: mjx.Data, params: EnvParams, is_h0: bool) -> jax.Array:
+def _get_agent_obs(data: mjx.Data, is_h0: bool) -> jax.Array:
     """Get observation for one agent."""
     if is_h0:
-        qpos_s, qvel_s = params.h0_qpos_start, params.h0_qvel_start
-        torso_idx, partner_idx = params.h0_torso_idx, params.h1_torso_idx
-        p_qvel_s = params.h1_qvel_start
+        qpos_s, qvel_s = _H0_QPOS_START, _H0_QVEL_START
+        torso_idx, partner_idx = _H0_TORSO_IDX, _H1_TORSO_IDX
+        p_qvel_s = _H1_QVEL_START
     else:
-        qpos_s, qvel_s = params.h1_qpos_start, params.h1_qvel_start
-        torso_idx, partner_idx = params.h1_torso_idx, params.h0_torso_idx
-        p_qvel_s = params.h0_qvel_start
-    
-    nq, nv = params.nq, params.nv
+        qpos_s, qvel_s = _H1_QPOS_START, _H1_QVEL_START
+        torso_idx, partner_idx = _H1_TORSO_IDX, _H0_TORSO_IDX
+        p_qvel_s = _H0_QVEL_START
     
     # Proprioception
-    joint_qpos = data.qpos[qpos_s + 3: qpos_s + nq]
-    joint_qvel = data.qvel[qvel_s + 3: qvel_s + nv]
+    joint_qpos = data.qpos[qpos_s + 3: qpos_s + _NQ]
+    joint_qvel = data.qvel[qvel_s + 3: qvel_s + _NV]
     root_quat = data.qpos[qpos_s + 3: qpos_s + 7]
     root_angvel = data.qvel[qvel_s + 3: qvel_s + 6]
     
@@ -333,18 +326,18 @@ def _get_agent_obs(data: mjx.Data, params: EnvParams, is_h0: bool) -> jax.Array:
     ])
 
 
-def _check_hug(data: mjx.Data, params: EnvParams) -> jax.Array:
+def _check_hug(data: mjx.Data) -> jax.Array:
     """Check hug condition."""
-    h0_pos = data.xpos[params.h0_torso_idx]
-    h1_pos = data.xpos[params.h1_torso_idx]
-    h0_mat = data.xmat[params.h0_torso_idx].reshape(3, 3)
-    h1_mat = data.xmat[params.h1_torso_idx].reshape(3, 3)
+    h0_pos = data.xpos[_H0_TORSO_IDX]
+    h1_pos = data.xpos[_H1_TORSO_IDX]
+    h0_mat = data.xmat[_H0_TORSO_IDX].reshape(3, 3)
+    h1_mat = data.xmat[_H1_TORSO_IDX].reshape(3, 3)
     
     dist = jnp.linalg.norm(h0_pos - h1_pos)
     facing = -jnp.dot(h0_mat[:, 0], h1_mat[:, 0])
     
-    h0_vel = data.qvel[params.h0_qvel_start: params.h0_qvel_start + 3]
-    h1_vel = data.qvel[params.h1_qvel_start: params.h1_qvel_start + 3]
+    h0_vel = data.qvel[_H0_QVEL_START: _H0_QVEL_START + 3]
+    h1_vel = data.qvel[_H1_QVEL_START: _H1_QVEL_START + 3]
     rel_speed = jnp.linalg.norm(h0_vel - h1_vel)
     
     h0_tilt = jnp.arccos(jnp.clip(h0_mat[2, 2], -1, 1))
@@ -358,28 +351,28 @@ def _check_hug(data: mjx.Data, params: EnvParams) -> jax.Array:
     )
 
 
-def _check_fallen(data: mjx.Data, params: EnvParams) -> jax.Array:
+def _check_fallen(data: mjx.Data) -> jax.Array:
     """Check if fallen."""
-    h0_z = data.xpos[params.h0_torso_idx, 2]
-    h1_z = data.xpos[params.h1_torso_idx, 2]
-    h0_tilt = jnp.arccos(jnp.clip(data.xmat[params.h0_torso_idx].reshape(3, 3)[2, 2], -1, 1))
-    h1_tilt = jnp.arccos(jnp.clip(data.xmat[params.h1_torso_idx].reshape(3, 3)[2, 2], -1, 1))
+    h0_z = data.xpos[_H0_TORSO_IDX, 2]
+    h1_z = data.xpos[_H1_TORSO_IDX, 2]
+    h0_tilt = jnp.arccos(jnp.clip(data.xmat[_H0_TORSO_IDX].reshape(3, 3)[2, 2], -1, 1))
+    h1_tilt = jnp.arccos(jnp.clip(data.xmat[_H1_TORSO_IDX].reshape(3, 3)[2, 2], -1, 1))
     return (h0_z < 0.5) | (h1_z < 0.5) | (h0_tilt > jnp.pi/2) | (h1_tilt > jnp.pi/2)
 
 
-def _compute_reward(data: mjx.Data, ctrl: jax.Array, success: jax.Array, fallen: jax.Array, params: EnvParams) -> jax.Array:
+def _compute_reward(data: mjx.Data, ctrl: jax.Array, success: jax.Array, fallen: jax.Array) -> jax.Array:
     """Compute reward."""
-    w = params.weights
-    h0_pos = data.xpos[params.h0_torso_idx]
-    h1_pos = data.xpos[params.h1_torso_idx]
-    h0_mat = data.xmat[params.h0_torso_idx].reshape(3, 3)
-    h1_mat = data.xmat[params.h1_torso_idx].reshape(3, 3)
+    w = _WEIGHTS
+    h0_pos = data.xpos[_H0_TORSO_IDX]
+    h1_pos = data.xpos[_H1_TORSO_IDX]
+    h0_mat = data.xmat[_H0_TORSO_IDX].reshape(3, 3)
+    h1_mat = data.xmat[_H1_TORSO_IDX].reshape(3, 3)
     
     dist = jnp.linalg.norm(h0_pos - h1_pos)
     facing = -jnp.dot(h0_mat[:, 0], h1_mat[:, 0])
     
-    h0_vel = data.qvel[params.h0_qvel_start: params.h0_qvel_start + 3]
-    h1_vel = data.qvel[params.h1_qvel_start: params.h1_qvel_start + 3]
+    h0_vel = data.qvel[_H0_QVEL_START: _H0_QVEL_START + 3]
+    h1_vel = data.qvel[_H1_QVEL_START: _H1_QVEL_START + 3]
     rel_speed = jnp.linalg.norm(h0_vel - h1_vel)
     
     r = (
@@ -513,8 +506,7 @@ def train(config: MJXConfig, checkpoint_dir: str, experiment_name: str):
     model_path = str(Path(__file__).parent.parent / "humanoid_hug" / "mjcf" / "humanoid_hug.xml")
     
     print(f"\nInitializing MJX environment with {config.num_envs} parallel envs...")
-    params, obs_dim, act_dim = make_env_params(model_path, config.frame_skip, config.horizon, config.stage)
-    print(f"  obs_dim={obs_dim}, act_dim={act_dim}")
+    obs_dim, act_dim = init_env(model_path, config.frame_skip, config.horizon, config.stage)
     
     rng, rng_h0, rng_h1 = jax.random.split(rng, 3)
     h0_state = create_train_state(rng_h0, obs_dim, act_dim, config.hidden_sizes, config.learning_rate)
@@ -531,8 +523,8 @@ def train(config: MJXConfig, checkpoint_dir: str, experiment_name: str):
     print("\nJIT compiling (first step is slow, please wait)...")
     
     rng, rng_reset = jax.random.split(rng)
-    env_state = reset_env(rng_reset, params, config.num_envs)
-    obs = _get_obs_batched(env_state.data, params)
+    env_state = reset_env(rng_reset, config.num_envs)
+    obs = _get_obs_batched(env_state.data)
     
     global_step = 0
     start_time = time.time()
@@ -550,7 +542,7 @@ def train(config: MJXConfig, checkpoint_dir: str, experiment_name: str):
             h0_act, h0_lp, h0_val = sample_action(r1, h0_state, obs["h0"])
             h1_act, h1_lp, h1_val = sample_action(r2, h1_state, obs["h1"])
             
-            env_state, next_obs, rewards, dones, _ = step_env(env_state, h0_act, h1_act, params)
+            env_state, next_obs, rewards, dones, _ = step_env(env_state, h0_act, h1_act)
             
             h0_trans.append(Transition(obs["h0"], h0_act, rewards, dones, h0_val, h0_lp))
             h1_trans.append(Transition(obs["h1"], h1_act, rewards, dones, h1_val, h1_lp))
