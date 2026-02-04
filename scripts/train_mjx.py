@@ -29,6 +29,7 @@ import numpy as np
 import optax
 from flax.training.train_state import TrainState
 from flax import struct
+from tqdm import tqdm
 
 # Check JAX backend
 print(f"JAX devices: {jax.devices()}")
@@ -758,6 +759,7 @@ def train(config: MJXConfig, checkpoint_dir: str, experiment_name: str):
     print(f"\nStarting training for {config.total_timesteps:,} timesteps ({config.num_updates} updates)")
     print(f"Batch size: {config.batch_size:,} ({config.num_envs} envs × {config.num_steps} steps)")
     print("=" * 60)
+    print("\nJIT compiling (first step will be slow)...")
     
     # Initial reset
     rng, rng_reset = jax.random.split(rng)
@@ -769,7 +771,10 @@ def train(config: MJXConfig, checkpoint_dir: str, experiment_name: str):
     global_step = 0
     start_time = time.time()
     
-    for update in range(1, config.num_updates + 1):
+    # Progress bar
+    pbar = tqdm(range(1, config.num_updates + 1), desc="Training", unit="update")
+    
+    for update in pbar:
         update_start = time.time()
         
         # Collect rollout
@@ -848,14 +853,14 @@ def train(config: MJXConfig, checkpoint_dir: str, experiment_name: str):
         
         # Logging
         if update % config.log_interval == 0:
-            elapsed = time.time() - start_time
             mean_reward = jnp.mean(h0_batch.reward).item()
             
-            print(f"Update {update:4d}/{config.num_updates} | "
-                  f"Steps: {global_step:,} | "
-                  f"FPS: {fps:,.0f} | "
-                  f"Reward: {mean_reward:.2f} | "
-                  f"Time: {elapsed:.0f}s")
+            # Update progress bar
+            pbar.set_postfix({
+                "reward": f"{mean_reward:.2f}",
+                "fps": f"{fps:,.0f}",
+                "steps": f"{global_step:,}",
+            })
         
         # Save checkpoint
         if update % config.save_interval == 0:
@@ -867,7 +872,9 @@ def train(config: MJXConfig, checkpoint_dir: str, experiment_name: str):
                 update=update,
                 global_step=global_step,
             )
-            print(f"  Saved checkpoint: {checkpoint_path}")
+            tqdm.write(f"  Saved checkpoint: {checkpoint_path}")
+    
+    pbar.close()
     
     # Final save
     final_path = log_dir / "final_model.npz"
@@ -878,10 +885,12 @@ def train(config: MJXConfig, checkpoint_dir: str, experiment_name: str):
     )
     
     total_time = time.time() - start_time
-    print(f"\nTraining complete!")
+    print(f"\n{'='*60}")
+    print(f"Training complete!")
     print(f"Total time: {total_time:.1f}s ({total_time/60:.1f} min)")
     print(f"Average FPS: {config.total_timesteps / total_time:,.0f}")
     print(f"Final model saved to: {final_path}")
+    print(f"{'='*60}")
 
 
 def main():
