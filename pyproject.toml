@@ -37,6 +37,13 @@ dev = [
     "pytest-cov>=4.0.0",
 ]
 train = [
+    "torch>=2.0.0",
+    "tensorboard>=2.10.0",
+    "tqdm>=4.60.0",
+    "imageio>=2.20.0",
+    "imageio-ffmpeg>=0.4.0",
+]
+train-ray = [
     "ray[rllib]>=2.0.0",
     "torch>=2.0.0",
     "tensorboard>=2.10.0",
