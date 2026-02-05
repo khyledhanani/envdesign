@@ -23,6 +23,7 @@ from typing import Any, Dict, NamedTuple, Optional, Tuple
 import jax
 import jax.numpy as jnp
 import flax.linen as nn
+from flax import serialization
 import mujoco
 from mujoco import mjx
 import numpy as np
@@ -39,7 +40,7 @@ print(f"JAX default backend: {jax.default_backend()}")
 # Configuration
 # =============================================================================
 
-@dataclass
+@dataclass(frozen=True)
 class MJXConfig:
     """Configuration for MJX PPO training."""
     horizon: int = 1000
@@ -179,7 +180,8 @@ def create_train_state(rng, obs_dim, act_dim, hidden_sizes, lr):
     return TrainState.create(apply_fn=net.apply, params=params, tx=tx)
 
 def _reset_single(rng):
-    rng, r1, r2, r3, r4, r5 = jax.random.split(rng, 6)
+    # Fix: Split into enough keys for all random calls (was reusing r2 and r4)
+    rng, r1, r2, r3, r4, r5, r6, r7 = jax.random.split(rng, 8)
     data = mjx.make_data(_MJX_MODEL)
     qpos, qvel = data.qpos, jnp.zeros_like(data.qvel)
     
@@ -187,15 +189,15 @@ def _reset_single(rng):
     
     s = _H0_QPOS_START
     h0_x = -dist + jax.random.uniform(r2, minval=-0.1, maxval=0.1)
-    h0_y = jax.random.uniform(r2, minval=-0.1, maxval=0.1)
-    yaw0 = jax.random.uniform(r3, minval=-0.2, maxval=0.2)
+    h0_y = jax.random.uniform(r3, minval=-0.1, maxval=0.1)  # Fixed: use r3 instead of r2
+    yaw0 = jax.random.uniform(r4, minval=-0.2, maxval=0.2)
     qpos = qpos.at[s:s+3].set(jnp.array([h0_x, h0_y, 1.4]))
     qpos = qpos.at[s+3:s+7].set(jnp.array([jnp.cos(yaw0/2), 0, 0, jnp.sin(yaw0/2)]))
     
     s = _H1_QPOS_START
-    h1_x = dist + jax.random.uniform(r4, minval=-0.1, maxval=0.1)
-    h1_y = jax.random.uniform(r4, minval=-0.1, maxval=0.1)
-    yaw1 = jnp.pi + jax.random.uniform(r5, minval=-0.2, maxval=0.2)
+    h1_x = dist + jax.random.uniform(r5, minval=-0.1, maxval=0.1)
+    h1_y = jax.random.uniform(r6, minval=-0.1, maxval=0.1)  # Fixed: use r6 instead of r5
+    yaw1 = jnp.pi + jax.random.uniform(r7, minval=-0.2, maxval=0.2)
     qpos = qpos.at[s:s+3].set(jnp.array([h1_x, h1_y, 1.4]))
     qpos = qpos.at[s+3:s+7].set(jnp.array([jnp.cos(yaw1/2), 0, 0, jnp.sin(yaw1/2)]))
     
@@ -205,7 +207,8 @@ def _reset_single(rng):
 def reset_env(rng, num_envs):
     reset_rngs = jax.random.split(rng, num_envs)
     data = jax.vmap(_reset_single)(reset_rngs)
-    return EnvState(data, jnp.zeros(num_envs, int), jnp.zeros(num_envs, int), rng)
+    # Fixed: Use explicit dtype instead of Python int (platform-dependent)
+    return EnvState(data, jnp.zeros(num_envs, dtype=jnp.int32), jnp.zeros(num_envs, dtype=jnp.int32), rng)
 
 def _get_agent_obs(data, is_h0):
     if is_h0:
@@ -255,8 +258,10 @@ def step_env(state, h0_act, h1_act):
     
     data = state.data.replace(ctrl=ctrl)
     
-    def phys_step(d, _): return mjx.step(_MJX_MODEL, d), None
-    data, _ = jax.lax.scan(lambda d, _: jax.vmap(phys_step)(d, None), data, None, length=_FRAME_SKIP)
+    # Fixed: Cleaner physics step - vmap over batch, scan over frame_skip
+    def batched_physics_step(data, _):
+        return jax.vmap(lambda d: mjx.step(_MJX_MODEL, d))(data), None
+    data, _ = jax.lax.scan(batched_physics_step, data, None, length=_FRAME_SKIP)
     
     h0_pos = data.xpos[:, _H0_TORSO_IDX]
     h1_pos = data.xpos[:, _H1_TORSO_IDX]
@@ -307,8 +312,9 @@ def compute_gae(rewards, values, dones, last_val, gamma, lam):
     _, adv = jax.lax.scan(scan, (jnp.zeros_like(last_val), last_val), (rewards[::-1], values[::-1], dones[::-1]))
     return adv[::-1], adv[::-1] + values
 
-def train_update(runner_state, _):
-    (env_state, obs, h0_state, h1_state, rng), config = runner_state
+@functools.partial(jax.jit, static_argnums=(1,))
+def train_update(runner_state, config):
+    env_state, obs, h0_state, h1_state, rng = runner_state
     
     # ROLLOUT
     def step_fn(carry, _):
@@ -341,7 +347,8 @@ def train_update(runner_state, _):
             ratio = jnp.exp(lp - x_lp)
             pg = -jnp.minimum(x_adv * ratio, x_adv * jnp.clip(ratio, 0.8, 1.2)).mean()
             vl = 0.5 * jnp.square(val.squeeze(-1) - x_ret).mean()
-            ent = 0.5 * jnp.sum(1 + jnp.log(2*jnp.pi) + 2*logstd).mean()
+            # Fixed: Remove redundant .mean() on scalar (logstd is state-independent)
+            ent = 0.5 * jnp.sum(1 + jnp.log(2*jnp.pi) + 2*logstd)
             return pg + config.vf_coef * vl - config.ent_coef * ent
         
         def epoch(state, rng):
@@ -364,9 +371,17 @@ def train_update(runner_state, _):
     h0_state = update_ppo(h0_state, flatten(h0_traj, h0_adv, h0_ret), r1)
     h1_state = update_ppo(h1_state, flatten(h1_traj, h1_adv, h1_ret), r2)
     
-    return ((env_state, obs, h0_state, h1_state, rng), config), {"reward": h0_traj.reward.mean()}
+    return (env_state, obs, h0_state, h1_state, rng), {"reward": h0_traj.reward.mean()}
 
 def train(config: MJXConfig, checkpoint_dir: str, name: str):
+    # Validate config: batch_size must be divisible by minibatch_size
+    if config.batch_size % config.minibatch_size != 0:
+        raise ValueError(
+            f"batch_size ({config.batch_size} = num_envs * num_steps) must be "
+            f"divisible by minibatch_size ({config.minibatch_size}). "
+            f"Got remainder {config.batch_size % config.minibatch_size}."
+        )
+    
     rng = jax.random.PRNGKey(config.seed)
     model = str(Path(__file__).parent.parent / "humanoid_hug" / "mjcf" / "humanoid_hug.xml")
     obs_dim, act_dim = init_env(model, config.frame_skip, config.horizon, config.stage)
@@ -377,27 +392,52 @@ def train(config: MJXConfig, checkpoint_dir: str, name: str):
     env_state = reset_env(r3, config.num_envs)
     obs = _get_obs(env_state.data)
     
-    # JIT the *entire* training loop body
-    train_step = jax.jit(train_update)
-    runner = ((env_state, obs, h0_state, h1_state, rng), config)
+    runner = (env_state, obs, h0_state, h1_state, rng)
     
     print("\nStarting training... (First update compiles JIT)")
     start = time.time()
     pbar = tqdm(range(config.num_updates))
     
     for i in pbar:
-        runner, metrics = train_step(runner, None)
+        runner, metrics = train_update(runner, config)
         # Block only for metrics
         jax.tree.map(lambda x: x.block_until_ready(), metrics)
         pbar.set_postfix({"rew": f"{metrics['reward']:.2f}"})
         
         if i % config.save_interval == 0:
-            path = Path(checkpoint_dir) / f"{name}_{i}.npz"
+            # Fixed: Use flax serialization for nested PyTree params
+            path = Path(checkpoint_dir) / f"{name}_{i}.msgpack"
             path.parent.mkdir(exist_ok=True, parents=True)
-            jnp.savez(path, h0=runner[0][2].params, h1=runner[0][3].params)
+            params_dict = {'h0': runner[2].params, 'h1': runner[3].params}
+            with open(path, 'wb') as f:
+                f.write(serialization.to_bytes(params_dict))
+    
+    # Save final checkpoint
+    elapsed = time.time() - start
+    print(f"\nTraining completed in {elapsed:.1f}s ({elapsed/60:.1f} min)")
+    final_path = Path(checkpoint_dir) / f"{name}_final.msgpack"
+    params_dict = {'h0': runner[2].params, 'h1': runner[3].params}
+    with open(final_path, 'wb') as f:
+        f.write(serialization.to_bytes(params_dict))
+    print(f"Final checkpoint saved to: {final_path}")
 
 def main():
-    config = MJXConfig()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--num-envs", type=int, default=2048)
+    parser.add_argument("--total-timesteps", type=int, default=20_000_000)
+    parser.add_argument("--num-steps", type=int, default=64)
+    parser.add_argument("--stage", type=int, default=0)
+    parser.add_argument("--seed", type=int, default=42)
+    args = parser.parse_args()
+    
+    config = MJXConfig(
+        num_envs=args.num_envs,
+        total_timesteps=args.total_timesteps,
+        num_steps=args.num_steps,
+        stage=args.stage,
+        seed=args.seed,
+    )
+    print(f"Training with {config.num_envs} envs, {config.total_timesteps:,} steps, {config.num_updates} updates")
     train(config, "checkpoints_mjx", "humanoid_hug")
 
 if __name__ == "__main__":
