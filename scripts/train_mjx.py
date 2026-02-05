@@ -186,16 +186,16 @@ def _reset_single(rng):
     dist = jax.random.uniform(r1, minval=0.75, maxval=1.25)
     
     s = _H0_QPOS_START
-    h0_x = -dist + jax.random.uniform(r2, -0.1, 0.1)
-    h0_y = jax.random.uniform(r2, -0.1, 0.1)
-    yaw0 = jax.random.uniform(r3, -0.2, 0.2)
+    h0_x = -dist + jax.random.uniform(r2, minval=-0.1, maxval=0.1)
+    h0_y = jax.random.uniform(r2, minval=-0.1, maxval=0.1)
+    yaw0 = jax.random.uniform(r3, minval=-0.2, maxval=0.2)
     qpos = qpos.at[s:s+3].set(jnp.array([h0_x, h0_y, 1.4]))
     qpos = qpos.at[s+3:s+7].set(jnp.array([jnp.cos(yaw0/2), 0, 0, jnp.sin(yaw0/2)]))
     
     s = _H1_QPOS_START
-    h1_x = dist + jax.random.uniform(r4, -0.1, 0.1)
-    h1_y = jax.random.uniform(r4, -0.1, 0.1)
-    yaw1 = jnp.pi + jax.random.uniform(r5, -0.2, 0.2)
+    h1_x = dist + jax.random.uniform(r4, minval=-0.1, maxval=0.1)
+    h1_y = jax.random.uniform(r4, minval=-0.1, maxval=0.1)
+    yaw1 = jnp.pi + jax.random.uniform(r5, minval=-0.2, maxval=0.2)
     qpos = qpos.at[s:s+3].set(jnp.array([h1_x, h1_y, 1.4]))
     qpos = qpos.at[s+3:s+7].set(jnp.array([jnp.cos(yaw1/2), 0, 0, jnp.sin(yaw1/2)]))
     
