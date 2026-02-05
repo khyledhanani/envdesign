@@ -134,7 +134,18 @@ def init_env(model_path: str, frame_skip: int, horizon: int, stage: int) -> Tupl
     }
     _WEIGHTS = stage_weights.get(stage, stage_weights[0])
     
-    return 68, len(h0_act)
+    if len(h0_act) != len(h1_act):
+        raise ValueError(
+            f"Actuator split mismatch: len(h0_act)={len(h0_act)} vs len(h1_act)={len(h1_act)}. "
+            "This trainer assumes symmetric action spaces."
+        )
+
+    # Derive obs_dim from model-derived nq/nv assumptions used by _get_agent_obs.
+    # (_NQ-3) + (_NV-3) + 4(quat) + 3(avel) + 3(rel_pos) + 3(rel_pel) + 3(rel_vel)
+    # + 2(face,up) + 3(contact) = _NQ + _NV + 15
+    obs_dim = _NQ + _NV + 15
+    act_dim = len(h0_act)
+    return obs_dim, act_dim
 
 
 # =============================================================================
@@ -205,7 +216,9 @@ def _reset_single(rng):
     return mjx.forward(_MJX_MODEL, data)
 
 def reset_env(rng, num_envs):
-    reset_rngs = jax.random.split(rng, num_envs)
+    # Never reuse PRNG keys: advance rng before storing it in state.
+    rng, reset_key = jax.random.split(rng)
+    reset_rngs = jax.random.split(reset_key, num_envs)
     data = jax.vmap(_reset_single)(reset_rngs)
     # Fixed: Use explicit dtype instead of Python int (platform-dependent)
     return EnvState(data, jnp.zeros(num_envs, dtype=jnp.int32), jnp.zeros(num_envs, dtype=jnp.int32), rng)
@@ -253,6 +266,8 @@ def _get_obs(data):
 def step_env(state, h0_act, h1_act):
     num_envs = h0_act.shape[0]
     ctrl = jnp.zeros((num_envs, _NU))
+    # Actions are produced by a squashed (tanh) policy, so they should already be in [-1, 1].
+    # Keep a clip here as a safety net against numerical drift.
     ctrl = ctrl.at[:, _H0_ACT_IDX].set(jnp.clip(h0_act, -1, 1))
     ctrl = ctrl.at[:, _H1_ACT_IDX].set(jnp.clip(h1_act, -1, 1))
     
@@ -285,27 +300,43 @@ def step_env(state, h0_act, h1_act):
     rng, reset_rng = jax.random.split(state.rng)
     reset_rngs = jax.random.split(reset_rng, num_envs)
     
-    def do_reset(d, flag, r):
-        new = _reset_single(r)
-        return jax.tree.map(lambda x, y: jnp.where(flag, y, x), d, new)
-    
-    data = jax.vmap(do_reset)(data, done, reset_rngs)
+    # Important: don't compute resets for all envs unconditionally. `jnp.where` would
+    # evaluate both branches; `lax.cond` only executes the taken branch.
+    data = jax.vmap(
+        lambda d, flag, r: jax.lax.cond(flag, lambda rr: _reset_single(rr), lambda _: d, r)
+    )(data, done, reset_rngs)
     new_step = jnp.where(done, 0, new_step)
     new_hold = jnp.where(done, 0, new_hold)
     
-    return EnvState(data, new_step, new_hold, rng), _get_obs(data), rew, done, {"success": success}
+    return EnvState(data, new_step, new_hold, rng), _get_obs(data), rew, done
+
+def _gaussian_log_prob(x, mean, logstd):
+    std = jnp.exp(logstd)
+    return -0.5 * jnp.sum(jnp.square((x - mean) / std) + 2.0 * logstd + jnp.log(2.0 * jnp.pi), axis=-1)
+
+
+def _squashed_gaussian_log_prob(action, mean, logstd, eps: float = 1e-6):
+    # action is tanh(raw). Invert with atanh for log_prob under the base Gaussian.
+    a = jnp.clip(action, -1.0 + eps, 1.0 - eps)
+    raw = jnp.arctanh(a)
+    logp_raw = _gaussian_log_prob(raw, mean, logstd)
+    # Change-of-variables correction: sum log |d tanh(raw)/d raw| = sum log(1 - tanh(raw)^2)
+    log_det = jnp.sum(jnp.log(1.0 - jnp.square(a) + eps), axis=-1)
+    return logp_raw - log_det
+
 
 def sample_action(rng, state, obs):
     mean, logstd, value = state.apply_fn(state.params, obs)
-    std = jnp.exp(logstd)
-    act = mean + std * jax.random.normal(rng, mean.shape)
-    lp = -0.5 * jnp.sum(jnp.square((act - mean)/std) + 2*logstd + jnp.log(2*jnp.pi), -1)
+    raw = mean + jnp.exp(logstd) * jax.random.normal(rng, mean.shape)
+    act = jnp.tanh(raw)
+    lp = _gaussian_log_prob(raw, mean, logstd) - jnp.sum(jnp.log(1.0 - jnp.square(act) + 1e-6), axis=-1)
     return act, lp, value.squeeze(-1)
 
 def compute_gae(rewards, values, dones, last_val, gamma, lam):
     def scan(carry, t):
         gae, next_v = carry
         r, v, d = t
+        d = d.astype(jnp.float32)
         delta = r + gamma * next_v * (1 - d) - v
         gae = delta + gamma * lam * (1 - d) * gae
         return (gae, v), gae
@@ -322,11 +353,11 @@ def train_update(runner_state, config):
         rng, r1, r2 = jax.random.split(rng, 3)
         h0_act, h0_lp, h0_val = sample_action(r1, h0_state, obs["h0"])
         h1_act, h1_lp, h1_val = sample_action(r2, h1_state, obs["h1"])
-        env_state, next_obs, rew, done, info = step_env(env_state, h0_act, h1_act)
+        env_state, next_obs, rew, done = step_env(env_state, h0_act, h1_act)
         return (env_state, next_obs, rng), (Transition(obs["h0"], h0_act, rew, done, h0_val, h0_lp),
-                                          Transition(obs["h1"], h1_act, rew, done, h1_val, h1_lp), info)
+                                          Transition(obs["h1"], h1_act, rew, done, h1_val, h1_lp))
     
-    (env_state, obs, rng), (h0_traj, h1_traj, info) = jax.lax.scan(step_fn, (env_state, obs, rng), None, config.num_steps)
+    (env_state, obs, rng), (h0_traj, h1_traj) = jax.lax.scan(step_fn, (env_state, obs, rng), None, config.num_steps)
     
     # GAE
     rng, r1, r2 = jax.random.split(rng, 3)
@@ -342,13 +373,15 @@ def train_update(runner_state, config):
         
         def loss(params, x_obs, x_act, x_lp, x_adv, x_ret):
             mean, logstd, val = state.apply_fn(params, x_obs)
-            std = jnp.exp(logstd)
-            lp = -0.5 * jnp.sum(jnp.square((x_act - mean)/std) + 2*logstd + jnp.log(2*jnp.pi), -1)
+            lp = _squashed_gaussian_log_prob(x_act, mean, logstd)
             ratio = jnp.exp(lp - x_lp)
-            pg = -jnp.minimum(x_adv * ratio, x_adv * jnp.clip(ratio, 0.8, 1.2)).mean()
+            pg = -jnp.minimum(
+                x_adv * ratio,
+                x_adv * jnp.clip(ratio, 1.0 - config.clip_coef, 1.0 + config.clip_coef),
+            ).mean()
             vl = 0.5 * jnp.square(val.squeeze(-1) - x_ret).mean()
             # Fixed: Remove redundant .mean() on scalar (logstd is state-independent)
-            ent = 0.5 * jnp.sum(1 + jnp.log(2*jnp.pi) + 2*logstd)
+            ent = 0.5 * jnp.sum(1.0 + jnp.log(2.0 * jnp.pi) + 2.0 * logstd)
             return pg + config.vf_coef * vl - config.ent_coef * ent
         
         def epoch(state, rng):
